@@ -1246,10 +1246,23 @@ body.is-resizing-col * {
   align-items: center;
   gap: 3px;
   overflow-x: auto;
+  overflow-y: hidden;
   white-space: nowrap;
+  scrollbar-width: thin;
+}
+
+.finder-pathbar::-webkit-scrollbar {
+  height: 4px;
+}
+
+.finder-pathbar::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.14);
+  border-radius: 999px;
+  border: none;
 }
 
 .pathbar-crumb {
+  flex-shrink: 0;
   border: none;
   background: transparent;
   padding: 2px 5px;

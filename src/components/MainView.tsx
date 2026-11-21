@@ -90,16 +90,19 @@ function renderBreadcrumbIcon(crumb: BreadcrumbItem, index: number, homePath: st
   if (crumb.path === "virtual://applications") {
     return <LayoutGrid size={12} strokeWidth={2} className="pathbar-icon home-icon" />;
   }
-  if (crumb.path === "virtual://computer" || (index === 0 && /^[A-Za-z]:\\?$/.test(crumb.path))) {
+  if (
+    crumb.path === "virtual://computer" ||
+    (index === 0 && (/^[A-Za-z]:\\?$/.test(crumb.path) || crumb.path === "/"))
+  ) {
     return <HardDrive size={12} strokeWidth={2} className="pathbar-icon drive-icon" />;
   }
-  if (crumb.path === "virtual://network") {
+  if (crumb.path === "virtual://network" || (index === 0 && crumb.path.startsWith("\\\\"))) {
     return <Globe size={12} strokeWidth={2} className="pathbar-icon drive-icon" />;
   }
   if (crumb.path === "virtual://trash") {
     return <Trash2 size={12} strokeWidth={2} className="pathbar-icon drive-icon" />;
   }
-  if (index === 0 && crumb.path.toLowerCase() === homePath.toLowerCase()) {
+  if (homePath && crumb.path.toLowerCase() === homePath.toLowerCase()) {
     return <Home size={12} strokeWidth={2} className="pathbar-icon home-icon" />;
   }
   return <Folder size={12} strokeWidth={2} className="pathbar-icon folder-icon" />;
@@ -158,7 +161,16 @@ export const MainView: React.FC<MainViewProps> = ({
   const [subColumns, setSubColumns] = useState<MillerColumn[]>([]);
   const [columnPreview, setColumnPreview] = useState<FileEntry | null>(null);
   const columnsScrollRef = useRef<HTMLDivElement | null>(null);
+  const pathbarRef = useRef<HTMLDivElement | null>(null);
   const columnReqIdRef = useRef(0);
+
+  // Keep the rightmost (current) breadcrumb visible when navigating into deep paths
+  useEffect(() => {
+    const el = pathbarRef.current;
+    if (el) {
+      el.scrollLeft = el.scrollWidth;
+    }
+  }, [breadcrumbs]);
 
   // Resizable column widths (List View & Miller Columns)
   const [listColWidths, setListColWidths] = useState({
@@ -1371,7 +1383,18 @@ export const MainView: React.FC<MainViewProps> = ({
       )}
 
       {/* Bottom Path Bar */}
-      <div className="finder-pathbar" aria-label="Path bar">
+      <div
+        ref={pathbarRef}
+        className="finder-pathbar"
+        aria-label="Path bar"
+        onWheel={(e) => {
+          const el = pathbarRef.current;
+          if (!el || el.scrollWidth <= el.clientWidth) return;
+          if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+            el.scrollLeft += e.deltaY;
+          }
+        }}
+      >
         {breadcrumbs.map((crumb, index) => {
           const isLast = index === breadcrumbs.length - 1;
           return (
@@ -1387,6 +1410,7 @@ export const MainView: React.FC<MainViewProps> = ({
               <button
                 type="button"
                 className={`pathbar-crumb ${isLast ? "current" : ""}`}
+                title={crumb.path}
                 onClick={() => {
                   if (!isLast) onOpenFolder(crumb.path);
                 }}
