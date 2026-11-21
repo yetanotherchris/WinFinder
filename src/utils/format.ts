@@ -55,7 +55,7 @@ const EXT_KIND_MAP: Record<string, string> = {
 };
 
 export function getKindLabel(entry: FileEntry): string {
-  if (entry.entryKind === "drive") return "Volume";
+  if (entry.entryKind === "drive") return entry.isLocked ? "Locked Volume" : "Volume";
   if (entry.entryKind === "app") return "Application";
   if (entry.isDir) return "Folder";
   if (!entry.extension) return "Document";

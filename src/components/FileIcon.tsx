@@ -7,6 +7,7 @@ interface FileIconProps {
   entryKind: EntryKind;
   extension: string | null;
   iconDataUrl: string | null;
+  isLocked?: boolean;
   size?: number;
 }
 
@@ -54,6 +55,7 @@ export const FileIcon: React.FC<FileIconProps> = ({
   entryKind,
   extension,
   iconDataUrl,
+  isLocked = false,
   size = 62,
 }) => {
   const uid = React.useId().replace(/:/g, "");
@@ -102,9 +104,22 @@ export const FileIcon: React.FC<FileIconProps> = ({
           />
           <rect x="9" y="39.5" width="46" height="12" rx="4" fill={`url(#drive-front-${uid})`} />
           <path d="M12 40.2H52" stroke="rgba(255,255,255,0.65)" strokeWidth="1" />
-          <circle cx="46.5" cy="45.5" r="2" fill="#34C759" />
+          <circle cx="46.5" cy="45.5" r="2" fill={isLocked ? "#FF9F0A" : "#34C759"} />
           <rect x="15" y="44.2" width="16" height="2.6" rx="1.3" fill="rgba(0,0,0,0.18)" />
         </g>
+        {isLocked && (
+          <g>
+            <circle cx="48.5" cy="18.5" r="10.5" fill="#F59E0B" stroke="#FFFFFF" strokeWidth="2" />
+            <path
+              d="M45.2 17.5V15.8C45.2 14.0 46.7 12.6 48.5 12.6C50.3 12.6 51.8 14.0 51.8 15.8V17.5"
+              stroke="#FFFFFF"
+              strokeWidth="1.9"
+              strokeLinecap="round"
+              fill="none"
+            />
+            <rect x="43.8" y="17.3" width="9.4" height="6.8" rx="1.8" fill="#FFFFFF" />
+          </g>
+        )}
       </svg>
     );
   }

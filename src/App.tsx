@@ -21,6 +21,7 @@ import {
   type FavoriteDropState,
 } from "./utils/favorites";
 import type {
+  BitlockerNotice,
   DirectoryListing,
   FavoriteFolder,
   FileEntry,
@@ -30,8 +31,20 @@ import type {
   SidebarLocations,
   SortConfig,
   TrackedPanelId,
+  UnlockDriveResult,
   ViewMode,
 } from "./types";
+
+const BITLOCKER_LOCKED_PREFIX = "BITLOCKER_LOCKED:";
+
+function parseBitlockerLockedDrive(err: unknown): string | null {
+  const raw = typeof err === "string" ? err : String(err);
+  if (raw.startsWith(BITLOCKER_LOCKED_PREFIX)) {
+    const root = raw.slice(BITLOCKER_LOCKED_PREFIX.length).trim();
+    return root || null;
+  }
+  return null;
+}
 
 const DEFAULT_VIEW_MODE: ViewMode = "icons";
 const DEFAULT_SORT: SortConfig = {
@@ -178,6 +191,8 @@ export const App: React.FC = () => {
   const [loading, setLoading] = useState<boolean>(true);
   const [emptyingTrash, setEmptyingTrash] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  const [bitlockerNotice, setBitlockerNotice] = useState<BitlockerNotice | null>(null);
+  const unlockingDriveRef = useRef<string | null>(null);
   const mockTrashEntriesRef = useRef<FileEntry[]>([
     {
       name: "Old Draft.docx",
@@ -472,6 +487,52 @@ export const App: React.FC = () => {
     []
   );
 
+  const handleUnlockBitlockerDrive = useCallback(
+    async (targetPath: string, driveRootHint?: string): Promise<boolean> => {
+      if (!isTauriRuntime()) return false;
+      const driveKey = (driveRootHint ?? targetPath).trim().toLowerCase();
+      if (unlockingDriveRef.current === driveKey) {
+        return false;
+      }
+      unlockingDriveRef.current = driveKey;
+      try {
+        const result = await invoke<UnlockDriveResult>("unlock_bitlocker_drive", {
+          path: driveRootHint ?? targetPath,
+        });
+        if (result.unlocked) {
+          setBitlockerNotice(null);
+          setError(null);
+          invalidateCachedDirectory("virtual://computer");
+          invalidateCachedDirectory(result.driveRoot);
+          invalidateCachedDirectory(targetPath);
+          return true;
+        }
+        setBitlockerNotice({
+          driveRoot: result.driveRoot,
+          targetPath,
+          message:
+            result.message ??
+            `Drive ${result.driveRoot} is locked with BitLocker.`,
+        });
+        return false;
+      } catch (unlockErr) {
+        const msg =
+          typeof unlockErr === "string" ? unlockErr : String(unlockErr);
+        setBitlockerNotice({
+          driveRoot: driveRootHint ?? targetPath,
+          targetPath,
+          message: msg,
+        });
+        return false;
+      } finally {
+        if (unlockingDriveRef.current === driveKey) {
+          unlockingDriveRef.current = null;
+        }
+      }
+    },
+    []
+  );
+
   const fetchDirectory = useCallback(
     async (
       targetPath?: string,
@@ -492,6 +553,7 @@ export const App: React.FC = () => {
       }
 
       setError(null);
+      setBitlockerNotice(null);
       setSelectedEntry(null);
 
       if (!isTauriRuntime()) {
@@ -596,13 +658,56 @@ export const App: React.FC = () => {
         if (reqId !== requestIdRef.current) {
           return null;
         }
+        const lockedDriveRoot = parseBitlockerLockedDrive(err);
+        if (lockedDriveRoot) {
+          setPendingPath(null);
+          setLoading(false);
+          const unlocked = await handleUnlockBitlockerDrive(
+            targetPath ?? lockedDriveRoot,
+            lockedDriveRoot
+          );
+          if (reqId !== requestIdRef.current) {
+            return null;
+          }
+          if (unlocked) {
+            try {
+              const retried = await invoke<DirectoryListing>("list_directory", {
+                path: targetPath ?? lockedDriveRoot,
+                showHidden: includeHidden,
+              });
+              setCachedDirectory(
+                targetPath ?? retried.currentPath,
+                includeHidden,
+                retried
+              );
+              if (reqId !== requestIdRef.current) {
+                return null;
+              }
+              setListing(retried);
+              setPendingPath(null);
+              setLoading(false);
+              return retried;
+            } catch (retryErr) {
+              if (reqId !== requestIdRef.current) {
+                return null;
+              }
+              setError(
+                typeof retryErr === "string" ? retryErr : String(retryErr)
+              );
+              setPendingPath(null);
+              setLoading(false);
+              return null;
+            }
+          }
+          return null;
+        }
         setError(typeof err === "string" ? err : String(err));
         setPendingPath(null);
         setLoading(false);
         return null;
       }
     },
-    [resolvePanelTarget, updateTrackedPanelState]
+    [handleUnlockBitlockerDrive, resolvePanelTarget, updateTrackedPanelState]
   );
 
   // Initial load: resolve sidebar locations, restore persisted state & open last panel/folder
@@ -1329,6 +1434,14 @@ export const App: React.FC = () => {
           isTrashView={activePath === "virtual://trash"}
           emptyingTrash={emptyingTrash}
           onEmptyTrash={() => void handleEmptyTrash()}
+          bitlockerNotice={bitlockerNotice}
+          onUnlockDrive={handleUnlockBitlockerDrive}
+          onDismissBitlockerNotice={() => setBitlockerNotice(null)}
+          onRetryUnlockDrive={() => {
+            if (bitlockerNotice) {
+              void navigateTo(bitlockerNotice.targetPath);
+            }
+          }}
         />
       </div>
 

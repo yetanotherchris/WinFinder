@@ -404,6 +404,33 @@ pub struct FileEntry {
     pub size: u64,
     pub modified_ms: Option<u64>,
     pub icon_data_url: Option<String>,
+    pub is_locked: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnlockDriveResult {
+    pub unlocked: bool,
+    pub cancelled: bool,
+    pub drive_root: String,
+    pub message: Option<String>,
+}
+
+/// Extracts a normalized Windows drive root (e.g. `D:\`) from a drive path or subfolder path.
+fn extract_windows_drive_root(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    let stripped = trimmed
+        .strip_prefix(r"\\?\")
+        .or_else(|| trimmed.strip_prefix(r"\\.\"))
+        .unwrap_or(trimmed);
+    let bytes = stripped.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        if bytes.len() == 2 || bytes[2] == b'\\' || bytes[2] == b'/' {
+            let letter = (bytes[0] as char).to_ascii_uppercase();
+            return Some(format!("{}:\\", letter));
+        }
+    }
+    None
 }
 
 enum AppsLoadState {
@@ -552,8 +579,15 @@ fn home_info() -> Result<(PathBuf, String, String), String> {
 fn list_fs_directory(target: &Path, show_hidden: bool) -> Result<DirectoryListing, String> {
     let (_home, home_path, home_name) = home_info()?;
 
-    let read_dir =
-        fs::read_dir(target).map_err(|e| format!("Unable to read folder contents: {}", e))?;
+    let read_dir = fs::read_dir(target).map_err(|e| {
+        #[cfg(target_os = "windows")]
+        {
+            if let Some(drive_root) = win_shell::check_bitlocker_locked_error(target, &e) {
+                return format!("BITLOCKER_LOCKED:{}", drive_root);
+            }
+        }
+        format!("Unable to read folder contents: {}", e)
+    })?;
 
     let mut entries = Vec::new();
     for item in read_dir.flatten() {
@@ -596,6 +630,7 @@ fn list_fs_directory(target: &Path, show_hidden: bool) -> Result<DirectoryListin
             size: if is_dir { 0 } else { metadata.len() },
             modified_ms,
             icon_data_url: None,
+            is_locked: false,
         });
     }
 
@@ -672,6 +707,7 @@ fn list_recents(show_hidden: bool) -> Result<DirectoryListing, String> {
                     size: metadata.len(),
                     modified_ms: if modified_ms > 0 { Some(modified_ms as u64) } else { None },
                     icon_data_url: None,
+                    is_locked: false,
                 },
             ));
         }
@@ -696,24 +732,28 @@ fn list_recents(show_hidden: bool) -> Result<DirectoryListing, String> {
 
 #[cfg(target_os = "windows")]
 mod win_shell {
-    use super::FileEntry;
+    use super::{extract_windows_drive_root, FileEntry, UnlockDriveResult};
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
     use std::collections::HashSet;
     use std::mem::size_of;
+    use std::path::Path;
     use windows::ApplicationModel::DataTransfer::{
         DataRequestedEventArgs, DataTransferManager,
     };
     use windows::Foundation::TypedEventHandler;
     use windows::Storage::{IStorageItem, StorageFile};
-    use windows::core::{Interface, HSTRING, PCSTR, PCWSTR, PWSTR};
+    use windows::core::{GUID, HSTRING, Interface, PCSTR, PCWSTR, PWSTR};
     use windows::Win32::Foundation::{
-        E_UNEXPECTED, GlobalFree, HANDLE, HWND, LPARAM, POINT, SIZE, WPARAM,
+        CloseHandle, E_UNEXPECTED, GetLastError, GlobalFree, HANDLE, HWND, LPARAM, POINT,
+        PROPERTYKEY, SIZE, WPARAM,
     };
     use windows::Win32::Graphics::Gdi::{
         CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits, GetObjectW, BITMAP, BITMAPINFO,
         BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP,
     };
-    use windows::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives};
+    use windows::Win32::Storage::FileSystem::{
+        GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW,
+    };
     use windows::Win32::System::Com::{
         CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_APARTMENTTHREADED,
     };
@@ -724,14 +764,17 @@ mod win_shell {
         GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE, GMEM_ZEROINIT,
     };
     use windows::Win32::System::Ole::CF_HDROP;
+    use windows::Win32::System::Threading::{WaitForSingleObject, INFINITE};
     use windows::Win32::UI::Shell::{
         BHID_EnumItems, BHID_SFUIObject, FOLDERID_AppsFolder, FOLDERID_RecycleBinFolder,
-        IContextMenu, IDataTransferManagerInterop, IEnumShellItems, IShellItem,
+        IContextMenu, IDataTransferManagerInterop, IEnumShellItems, IShellItem, IShellItem2,
         IShellItemImageFactory, SHCreateItemFromParsingName, SHCreateItemFromRelativeName,
-        SHEmptyRecycleBinW, SHGetKnownFolderItem, CMF_EXPLORE, CMF_NORMAL, CMIC_MASK_PTINVOKE,
-        CMINVOKECOMMANDINFO, CMINVOKECOMMANDINFOEX, DROPFILES, KF_FLAG_DEFAULT, SEE_MASK_UNICODE,
-        SHERB_NOCONFIRMATION, SHERB_NOPROGRESSUI, SIGDN_DESKTOPABSOLUTEPARSING, SIGDN_FILESYSPATH,
-        SIGDN_NORMALDISPLAY, SIGDN_PARENTRELATIVEPARSING, SIIGBF_BIGGERSIZEOK, SIIGBF_ICONONLY,
+        SHEmptyRecycleBinW, SHGetKnownFolderItem, ShellExecuteExW, CMF_EXPLORE, CMF_NORMAL,
+        CMIC_MASK_PTINVOKE, CMINVOKECOMMANDINFO, CMINVOKECOMMANDINFOEX, DROPFILES,
+        KF_FLAG_DEFAULT, SEE_MASK_FLAG_NO_UI, SEE_MASK_NOCLOSEPROCESS, SEE_MASK_UNICODE,
+        SHELLEXECUTEINFOW, SHERB_NOCONFIRMATION, SHERB_NOPROGRESSUI,
+        SIGDN_DESKTOPABSOLUTEPARSING, SIGDN_FILESYSPATH, SIGDN_NORMALDISPLAY,
+        SIGDN_PARENTRELATIVEPARSING, SIIGBF_BIGGERSIZEOK, SIIGBF_ICONONLY,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         CreatePopupMenu, DestroyMenu, GetCursorPos, PostMessageW, SetForegroundWindow,
@@ -739,6 +782,16 @@ mod win_shell {
     };
 
     const DRIVE_REMOTE: u32 = 4;
+    /// `FVE_E_LOCKED_VOLUME` (`0x80310000` / `2150694912`): This drive is locked by BitLocker Drive Encryption.
+    pub(super) const FVE_E_LOCKED_VOLUME: u32 = 0x8031_0000;
+    const ERROR_ACCESS_DENIED_CODE: u32 = 5;
+    /// `System.Volume.BitLockerProtection` property key (`{49691C90-7E17-101A-A91C-08002B2ECDA9}`, pid 2).
+    /// Value `6` indicates the volume is BitLocker-encrypted and currently locked.
+    const PKEY_VOLUME_BITLOCKER_PROTECTION: PROPERTYKEY = PROPERTYKEY {
+        fmtid: GUID::from_u128(0x49691c90_7e17_101a_a91c_08002b2ecda9),
+        pid: 2,
+    };
+    const BITLOCKER_PROTECTION_LOCKED: i32 = 6;
 
     unsafe fn pwstr_to_string(ptr: PWSTR) -> Option<String> {
         if ptr.is_null() {
@@ -1002,6 +1055,7 @@ mod win_shell {
                             size: 0,
                             modified_ms: None,
                             icon_data_url,
+                            is_locked: false,
                         });
                     }
 
@@ -1012,6 +1066,165 @@ mod win_shell {
 
                 entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
                 Ok(entries)
+            })();
+
+            if should_uninit {
+                CoUninitialize();
+            }
+
+            result
+        }
+    }
+
+    fn is_drive_bitlocker_locked_via_shell_prop(root: &str) -> bool {
+        unsafe {
+            let co_hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            let should_uninit = co_hr.is_ok();
+
+            let locked = (|| -> bool {
+                let Ok(item): Result<IShellItem2, _> =
+                    SHCreateItemFromParsingName(&HSTRING::from(root), None)
+                else {
+                    return false;
+                };
+                match item.GetInt32(&PKEY_VOLUME_BITLOCKER_PROTECTION) {
+                    Ok(status) => status == BITLOCKER_PROTECTION_LOCKED,
+                    Err(_) => false,
+                }
+            })();
+
+            if should_uninit {
+                CoUninitialize();
+            }
+            locked
+        }
+    }
+
+    pub fn is_drive_bitlocker_locked(root: &str) -> bool {
+        let wide = HSTRING::from(root);
+        let vol_res = unsafe { GetVolumeInformationW(&wide, None, None, None, None, None) };
+        if vol_res.is_ok() {
+            return false;
+        }
+        let err_code = unsafe { GetLastError().0 };
+        if err_code == FVE_E_LOCKED_VOLUME {
+            return true;
+        }
+        if err_code == ERROR_ACCESS_DENIED_CODE {
+            return is_drive_bitlocker_locked_via_shell_prop(root);
+        }
+        false
+    }
+
+    pub fn check_bitlocker_locked_error(target: &Path, err: &std::io::Error) -> Option<String> {
+        let raw = err.raw_os_error()? as u32;
+        let drive_root = extract_windows_drive_root(&target.to_string_lossy())?;
+        if raw == FVE_E_LOCKED_VOLUME {
+            return Some(drive_root);
+        }
+        if raw == ERROR_ACCESS_DENIED_CODE && is_drive_bitlocker_locked(&drive_root) {
+            return Some(drive_root);
+        }
+        None
+    }
+
+    pub fn prompt_bitlocker_unlock(hwnd_raw: isize, path: &str) -> Result<UnlockDriveResult, String> {
+        let drive_root = extract_windows_drive_root(path)
+            .ok_or_else(|| "Only Windows drive volumes can be unlocked with BitLocker.".to_string())?;
+
+        if !is_drive_bitlocker_locked(&drive_root) && std::fs::read_dir(&drive_root).is_ok() {
+            return Ok(UnlockDriveResult {
+                unlocked: true,
+                cancelled: false,
+                drive_root,
+                message: None,
+            });
+        }
+
+        let hwnd = HWND(hwnd_raw as *mut _);
+        unsafe {
+            let co_hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            let should_uninit = co_hr.is_ok();
+
+            let result = (|| -> Result<UnlockDriveResult, String> {
+                // Primary: invoke the native Windows Shell "unlock-bde" verb on the drive root (e.g. D:\)
+                let verb = HSTRING::from("unlock-bde");
+                let file = HSTRING::from(&drive_root);
+                let mut sei = SHELLEXECUTEINFOW {
+                    cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
+                    fMask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_UNICODE | SEE_MASK_FLAG_NO_UI,
+                    hwnd,
+                    lpVerb: PCWSTR(verb.as_ptr()),
+                    lpFile: PCWSTR(file.as_ptr()),
+                    nShow: SW_SHOWNORMAL.0,
+                    ..Default::default()
+                };
+
+                let launched_primary = ShellExecuteExW(&mut sei).is_ok();
+                let mut proc_handle = sei.hProcess;
+
+                if !launched_primary {
+                    // Fallback: launch native bdeunlock.exe directly with drive letter (e.g. "D:")
+                    let drive_arg = drive_root.trim_end_matches('\\').to_string();
+                    let open_verb = HSTRING::from("open");
+                    let exe_name = HSTRING::from("bdeunlock.exe");
+                    let params = HSTRING::from(&drive_arg);
+                    let mut sei_fallback = SHELLEXECUTEINFOW {
+                        cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
+                        fMask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_UNICODE,
+                        hwnd,
+                        lpVerb: PCWSTR(open_verb.as_ptr()),
+                        lpFile: PCWSTR(exe_name.as_ptr()),
+                        lpParameters: PCWSTR(params.as_ptr()),
+                        nShow: SW_SHOWNORMAL.0,
+                        ..Default::default()
+                    };
+
+                    ShellExecuteExW(&mut sei_fallback).map_err(|e| {
+                        format!(
+                            "Failed to open Windows BitLocker unlock prompt for {}: {}",
+                            drive_root, e
+                        )
+                    })?;
+                    proc_handle = sei_fallback.hProcess;
+                }
+
+                let waited_for_process = !proc_handle.is_invalid() && !proc_handle.0.is_null();
+                if waited_for_process {
+                    let _ = WaitForSingleObject(proc_handle, INFINITE);
+                    let _ = CloseHandle(proc_handle);
+                }
+
+                let is_unlocked =
+                    !is_drive_bitlocker_locked(&drive_root) && std::fs::read_dir(&drive_root).is_ok();
+                if is_unlocked {
+                    Ok(UnlockDriveResult {
+                        unlocked: true,
+                        cancelled: false,
+                        drive_root,
+                        message: None,
+                    })
+                } else if waited_for_process {
+                    Ok(UnlockDriveResult {
+                        unlocked: false,
+                        cancelled: true,
+                        drive_root: drive_root.clone(),
+                        message: Some(format!(
+                            "Drive {} is still locked with BitLocker.",
+                            drive_root
+                        )),
+                    })
+                } else {
+                    Ok(UnlockDriveResult {
+                        unlocked: false,
+                        cancelled: false,
+                        drive_root: drive_root.clone(),
+                        message: Some(format!(
+                            "BitLocker unlock prompt opened for {}. Open the drive again once unlocked.",
+                            drive_root
+                        )),
+                    })
+                }
             })();
 
             if should_uninit {
@@ -1040,6 +1253,12 @@ mod win_shell {
                 continue;
             }
 
+            let is_locked = if is_remote {
+                false
+            } else {
+                is_drive_bitlocker_locked(&root)
+            };
+
             let label = if is_remote {
                 format!("Network Drive ({}:)", letter)
             } else {
@@ -1055,6 +1274,7 @@ mod win_shell {
                 size: 0,
                 modified_ms: None,
                 icon_data_url: None,
+                is_locked,
             });
         }
 
@@ -1335,6 +1555,7 @@ mod win_shell {
                             size,
                             modified_ms,
                             icon_data_url: None,
+                            is_locked: false,
                         });
                     }
 
@@ -1892,6 +2113,36 @@ fn validate_favorite_dirs(paths: Vec<String>) -> Vec<FavoriteFolder> {
 }
 
 #[tauri::command]
+async fn unlock_bitlocker_drive(
+    window: tauri::Window,
+    path: String,
+) -> Result<UnlockDriveResult, String> {
+    #[cfg(target_os = "windows")]
+    {
+        let hwnd_raw = window
+            .hwnd()
+            .map_err(|e| format!("Failed to get window handle: {}", e))?
+            .0 as isize;
+        tauri::async_runtime::spawn_blocking(move || {
+            win_shell::prompt_bitlocker_unlock(hwnd_raw, &path)
+        })
+        .await
+        .map_err(|e| format!("BitLocker unlock task failed: {}", e))?
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = window;
+        Ok(UnlockDriveResult {
+            unlocked: false,
+            cancelled: false,
+            drive_root: path,
+            message: Some("BitLocker unlock is only supported on Windows.".to_string()),
+        })
+    }
+}
+
+#[tauri::command]
 async fn empty_trash() -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(|| {
         #[cfg(target_os = "windows")]
@@ -2001,6 +2252,7 @@ pub fn run() {
             save_custom_favorites,
             check_directory_exists,
             validate_favorite_dirs,
+            unlock_bitlocker_drive,
             empty_trash
         ])
         .run(tauri::generate_context!())
@@ -2062,6 +2314,36 @@ mod tests {
                 ("chris", "/Users/chris"),
                 ("Documents", "/Users/chris/Documents"),
             ]
+        );
+    }
+
+    #[test]
+    fn extract_windows_drive_root_parses_drive_and_subfolders() {
+        assert_eq!(extract_windows_drive_root("D:"), Some("D:\\".to_string()));
+        assert_eq!(extract_windows_drive_root("d:\\"), Some("D:\\".to_string()));
+        assert_eq!(extract_windows_drive_root("e:/Projects/WinFinder"), Some("E:\\".to_string()));
+        assert_eq!(extract_windows_drive_root(r"\\?\F:\Secret"), Some("F:\\".to_string()));
+        assert_eq!(extract_windows_drive_root("virtual://computer"), None);
+        assert_eq!(extract_windows_drive_root("/Users/chris"), None);
+        assert_eq!(extract_windows_drive_root(r"\\server\share"), None);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn check_bitlocker_locked_error_detects_fve_locked_volume() {
+        let err = std::io::Error::from_raw_os_error(win_shell::FVE_E_LOCKED_VOLUME as i32);
+        assert_eq!(
+            win_shell::check_bitlocker_locked_error(Path::new(r"D:\"), &err),
+            Some("D:\\".to_string())
+        );
+        assert_eq!(
+            win_shell::check_bitlocker_locked_error(Path::new(r"D:\Work"), &err),
+            Some("D:\\".to_string())
+        );
+        let not_ready = std::io::Error::from_raw_os_error(21); // ERROR_NOT_READY
+        assert_eq!(
+            win_shell::check_bitlocker_locked_error(Path::new(r"D:\"), &not_ready),
+            None
         );
     }
 }

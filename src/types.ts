@@ -25,6 +25,20 @@ export interface FileEntry {
   size: number;
   modifiedMs: number | null;
   iconDataUrl: string | null;
+  isLocked?: boolean;
+}
+
+export interface UnlockDriveResult {
+  unlocked: boolean;
+  cancelled: boolean;
+  driveRoot: string;
+  message: string | null;
+}
+
+export interface BitlockerNotice {
+  driveRoot: string;
+  targetPath: string;
+  message: string;
 }
 
 export interface DirectoryListing {
