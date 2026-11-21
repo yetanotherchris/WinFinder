@@ -1003,14 +1003,14 @@ export const App: React.FC = () => {
       const savedPanel = panelStatesRef.current[initialPanel];
       const initialViewMode = savedPanel?.viewMode ?? DEFAULT_VIEW_MODE;
       const initialSort = savedPanel?.sort ?? DEFAULT_SORT;
-      const validSavedLastPath =
+      const candidateSavedPath =
         savedPanel?.lastPath && isPathWithinRoot(savedPanel.lastPath, rootPath)
           ? savedPanel.lastPath
           : null;
-      const targetPath = await resolvePanelTarget(validSavedLastPath, rootPath);
+      const targetPath = await resolvePanelTarget(candidateSavedPath, rootPath);
       const sameAsSaved = Boolean(
-        validSavedLastPath &&
-          targetPath.toLowerCase() === validSavedLastPath.toLowerCase()
+        candidateSavedPath &&
+          normalizePathKey(targetPath) === normalizePathKey(candidateSavedPath)
       );
       const initialExpanded = sameAsSaved ? (savedPanel?.expandedPaths ?? []) : [];
       const initialColumns = sameAsSaved ? (savedPanel?.columnPaths ?? []) : [];
@@ -1248,7 +1248,6 @@ export const App: React.FC = () => {
         }
         return;
       }
-
       setRevealRequest(null);
       setExpandedPaths([]);
       setColumnPaths([]);
@@ -1269,14 +1268,10 @@ export const App: React.FC = () => {
         setHistoryIndex((idx) => idx + 1);
         if (isTrackedPanel(targetPanel)) {
           const rootPath = getRootPathForPanel(targetPanel, locationsRef.current);
-          const withinRoot = rootPath
-            ? isPathWithinRoot(data.currentPath, rootPath)
-            : true;
+          const withinRoot =
+            rootPath !== null && isPathWithinRoot(data.currentPath, rootPath);
           updateTrackedPanelState(targetPanel, {
-            lastPath:
-              !withinRoot && isCustomFavoritePanel(targetPanel)
-                ? rootPath
-                : data.currentPath,
+            lastPath: withinRoot ? data.currentPath : rootPath,
             expandedPaths: [],
             columnPaths: [],
           });
@@ -1385,26 +1380,27 @@ export const App: React.FC = () => {
         setViewMode(nextViewMode);
         setSortConfig(nextSort);
 
-        const validSavedLastPath =
+        // Clicking the already-active panel while inside a subfolder (or outside its root) returns to its root.
+        // Switching to a tracked panel only restores saved.lastPath if it lies within that panel's root subtree.
+        const savedWithinRoot = Boolean(
           saved?.lastPath && isPathWithinRoot(saved.lastPath, rootPath)
-            ? saved.lastPath
-            : null;
+        );
+        const validSavedPath = savedWithinRoot ? saved?.lastPath : null;
 
-        // Clicking the already-active panel while inside a subfolder returns to its root
         let targetPath: string;
         if (wasSamePanel) {
           targetPath = rootPath;
         } else if (
-          validSavedLastPath &&
-          getCachedDirectory(validSavedLastPath, showHiddenRef.current)
+          validSavedPath &&
+          getCachedDirectory(validSavedPath, showHiddenRef.current)
         ) {
           // Fast path: already cached in memory; background revalidation handles external deletion
-          targetPath = validSavedLastPath;
+          targetPath = validSavedPath;
         } else {
-          targetPath = await resolvePanelTarget(validSavedLastPath, rootPath);
+          targetPath = await resolvePanelTarget(validSavedPath, rootPath);
         }
 
-        if (activePath === targetPath && !error) {
+        if (normalizePathKey(activePath) === normalizePathKey(targetPath) && !error) {
           updateTrackedPanelState(panel, {
             viewMode: nextViewMode,
             sort: nextSort,
@@ -1415,8 +1411,8 @@ export const App: React.FC = () => {
 
         const restoreSubState = Boolean(
           !wasSamePanel &&
-            validSavedLastPath &&
-            targetPath.toLowerCase() === validSavedLastPath.toLowerCase()
+            validSavedPath &&
+            normalizePathKey(targetPath) === normalizePathKey(validSavedPath)
         );
         const nextExpanded = restoreSubState ? (saved?.expandedPaths ?? []) : [];
         const nextColumns = restoreSubState ? (saved?.columnPaths ?? []) : [];
@@ -1453,7 +1449,7 @@ export const App: React.FC = () => {
         setSortConfig(nextSort);
         setExpandedPaths([]);
         setColumnPaths([]);
-        if (activePath === rootPath && !error) return;
+        if (normalizePathKey(activePath) === normalizePathKey(rootPath) && !error) return;
         const data = await fetchDirectory(rootPath);
         if (data) {
           setHistory((prev) => {
@@ -1483,18 +1479,12 @@ export const App: React.FC = () => {
       const panel = activePanelRef.current;
       if (isTrackedPanel(panel)) {
         const rootPath = getRootPathForPanel(panel, locationsRef.current);
-        const currentPath = listingRef.current?.currentPath;
-        if (
-          !isCustomFavoritePanel(panel) ||
-          !rootPath ||
-          !currentPath ||
-          isPathWithinRoot(currentPath, rootPath)
-        ) {
+        if (rootPath !== null && isPathWithinRoot(activePath, rootPath)) {
           updateTrackedPanelState(panel, { expandedPaths: paths });
         }
       }
     },
-    [updateTrackedPanelState]
+    [activePath, updateTrackedPanelState]
   );
 
   const handleColumnPathsChange = useCallback(
@@ -1503,18 +1493,12 @@ export const App: React.FC = () => {
       const panel = activePanelRef.current;
       if (isTrackedPanel(panel)) {
         const rootPath = getRootPathForPanel(panel, locationsRef.current);
-        const currentPath = listingRef.current?.currentPath;
-        if (
-          !isCustomFavoritePanel(panel) ||
-          !rootPath ||
-          !currentPath ||
-          isPathWithinRoot(currentPath, rootPath)
-        ) {
+        if (rootPath !== null && isPathWithinRoot(activePath, rootPath)) {
           updateTrackedPanelState(panel, { columnPaths: paths });
         }
       }
     },
-    [updateTrackedPanelState]
+    [activePath, updateTrackedPanelState]
   );
 
   const handleChangeViewMode = useCallback(
@@ -1864,14 +1848,10 @@ export const App: React.FC = () => {
         setHistoryIndex(nextIndex);
         if (isTrackedPanel(targetPanel)) {
           const rootPath = getRootPathForPanel(targetPanel, locationsRef.current);
-          const withinRoot = rootPath
-            ? isPathWithinRoot(data.currentPath, rootPath)
-            : true;
+          const withinRoot =
+            rootPath !== null && isPathWithinRoot(data.currentPath, rootPath);
           updateTrackedPanelState(targetPanel, {
-            lastPath:
-              !withinRoot && isCustomFavoritePanel(targetPanel)
-                ? rootPath
-                : data.currentPath,
+            lastPath: withinRoot ? data.currentPath : rootPath,
           });
         }
       }
