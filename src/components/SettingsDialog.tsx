@@ -128,7 +128,7 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
         </div>
 
         <div className="settings-dialog-footer">
-          <span className="settings-storage-hint">Saved to ~/.winfinder</span>
+          <span className="settings-storage-hint">Saved to ~/.winfinder/config.json</span>
           <button
             type="button"
             className="finder-dialog-btn finder-dialog-btn-primary settings-done-btn"
