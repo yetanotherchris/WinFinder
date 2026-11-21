@@ -583,24 +583,17 @@ export const Toolbar: React.FC<ToolbarProps> = ({
                   <Settings size={13} strokeWidth={2} />
                 </span>
                 <span>Settings…</span>
-                <span className="sort-menu-shortcut">Ctrl+,</span>
+                <span className="sort-menu-shortcut">
+                  {typeof navigator !== "undefined" && /Mac/i.test(navigator.platform)
+                    ? "⌘,"
+                    : "Ctrl+,"}
+                </span>
               </button>
             </div>
           )}
         </div>
 
         <div className="toolbar-spacer-sm" />
-
-        {/* Settings */}
-        <button
-          type="button"
-          className="toolbar-btn"
-          onClick={onOpenSettings}
-          title="Settings (Ctrl+,)"
-          aria-label="Settings"
-        >
-          <Settings size={15} strokeWidth={1.8} />
-        </button>
 
         {/* Search */}
         {searchOpen ? (
