@@ -1,3 +1,5 @@
+mod cli;
+
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
@@ -1856,6 +1858,24 @@ async fn share_with_os(window: tauri::Window, path: String) -> Result<(), String
     }
 }
 
+struct InitialPath(Option<String>);
+
+fn resolve_initial_path_from_args<I, S>(args: I) -> Option<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let raw = cli::extract_cli_path_arg(args)?;
+    let home = dirs::home_dir();
+    let cwd = std::env::current_dir().ok();
+    cli::resolve_cli_path_with(&raw, home.as_deref(), cwd.as_deref())
+}
+
+#[tauri::command]
+fn get_initial_path(initial_path: tauri::State<'_, InitialPath>) -> Option<String> {
+    initial_path.0.clone()
+}
+
 #[tauri::command]
 fn load_app_state(store: tauri::State<'_, Arc<AppStateStore>>) -> PersistedAppState {
     store.snapshot()
@@ -2152,6 +2172,7 @@ pub fn run() {
     let apps_cache = AppsCache::new();
     apps_cache.start_preload();
     let state_store = AppStateStore::load();
+    let initial_path = InitialPath(resolve_initial_path_from_args(std::env::args().skip(1)));
     let window_ready = Arc::new(AtomicBool::new(false));
     let window_ready_for_setup = Arc::clone(&window_ready);
     let window_ready_for_events = Arc::clone(&window_ready);
@@ -2159,6 +2180,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(apps_cache)
         .manage(Arc::clone(&state_store))
+        .manage(initial_path)
         .setup(move |app| {
             if let Some(window) = app.get_webview_window("main") {
                 let store = app.state::<Arc<AppStateStore>>();
@@ -2226,6 +2248,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_home_dir,
             get_sidebar_locations,
+            get_initial_path,
             list_directory,
             open_item,
             show_context_menu,
