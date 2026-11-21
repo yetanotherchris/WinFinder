@@ -89,3 +89,8 @@ export interface PersistedAppState {
   customFavorites?: FavoriteFolder[];
   settings?: AppSettings;
 }
+
+export interface ResolvedGoToPath {
+  directoryPath: string;
+  selectFilePath: string | null;
+}

@@ -16,6 +16,7 @@ import {
   Link,
   FolderOpen,
   FolderPlus,
+  FolderInput,
   Terminal,
   RefreshCw,
   Share2,
@@ -42,6 +43,7 @@ interface ToolbarProps {
   onCopyFile: (entry: FileEntry) => void;
   onCopyPath: (entry: FileEntry) => void;
   onNewFolder: () => void;
+  onGoToPath: () => void;
   onToggleShowHidden: () => void;
   onOpenInTerminal: () => void;
   onCopyCurrentPath: () => void;
@@ -79,6 +81,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
   onCopyFile,
   onCopyPath,
   onNewFolder,
+  onGoToPath,
   onToggleShowHidden,
   onOpenInTerminal,
   onCopyCurrentPath,
@@ -443,6 +446,26 @@ export const Toolbar: React.FC<ToolbarProps> = ({
                   <FolderPlus size={13} strokeWidth={2} />
                 </span>
                 <span>New Folder</span>
+              </button>
+
+              <button
+                type="button"
+                role="menuitem"
+                className="sort-menu-item"
+                onClick={() => {
+                  setActionsMenuOpen(false);
+                  onGoToPath();
+                }}
+              >
+                <span className="sort-check-slot">
+                  <FolderInput size={13} strokeWidth={2} />
+                </span>
+                <span className="menu-item-label">Go to Path…</span>
+                <span className="menu-item-shortcut">
+                  {typeof navigator !== "undefined" && /Mac/i.test(navigator.platform)
+                    ? "⇧⌘G"
+                    : "Ctrl+Shift+G"}
+                </span>
               </button>
 
               <div className="sort-menu-sep" />

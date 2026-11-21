@@ -580,6 +580,21 @@ body.is-dragging-folder-blocked * {
   color: #b4b4b9;
 }
 
+.menu-item-label {
+  flex: 1;
+}
+
+.menu-item-shortcut {
+  margin-left: 12px;
+  font-size: 11px;
+  color: var(--text-muted);
+  letter-spacing: 0.01em;
+}
+
+.sort-menu-item:hover:not(:disabled) .menu-item-shortcut {
+  color: rgba(255, 255, 255, 0.82);
+}
+
 .share-popover {
   min-width: 210px;
 }
@@ -1792,6 +1807,94 @@ body.is-dragging-folder-blocked * {
 }
 
 .settings-done-btn {
+  flex: 0 0 auto;
+  min-width: 72px;
+}
+
+/* ==================== GO TO PATH DIALOG ==================== */
+.goto-dialog {
+  width: 420px;
+  padding: 18px 20px 16px;
+  align-items: stretch;
+  text-align: left;
+}
+
+.goto-form {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+}
+
+.goto-dialog-title {
+  display: block;
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
+}
+
+.goto-input {
+  width: 100%;
+  height: 30px;
+  padding: 0 9px;
+  border-radius: 6px;
+  border: 1px solid rgba(0, 0, 0, 0.18);
+  background: #ffffff;
+  color: var(--text-primary);
+  font-family: var(--font-system);
+  font-size: 13px;
+  outline: none;
+  user-select: text;
+  -webkit-user-select: text;
+  box-shadow: inset 0 1px 1.5px rgba(0, 0, 0, 0.05);
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+
+.goto-input::placeholder {
+  color: var(--text-muted);
+}
+
+.goto-input:focus {
+  border-color: var(--accent-blue);
+  box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.25);
+}
+
+.goto-input.has-error {
+  border-color: #d92d20;
+}
+
+.goto-input.has-error:focus {
+  border-color: #d92d20;
+  box-shadow: 0 0 0 3px rgba(217, 45, 32, 0.2);
+}
+
+.goto-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+  margin-top: 8px;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: #c92a2a;
+  user-select: text;
+  -webkit-user-select: text;
+  word-break: break-word;
+}
+
+.goto-error-icon {
+  flex-shrink: 0;
+  margin-top: 1.5px;
+}
+
+.goto-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.goto-btn {
   flex: 0 0 auto;
   min-width: 72px;
 }

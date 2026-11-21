@@ -8,6 +8,7 @@ import { Toolbar } from "./components/Toolbar";
 import { MainView } from "./components/MainView";
 import { FileIcon } from "./components/FileIcon";
 import { SettingsDialog } from "./components/SettingsDialog";
+import { GoToPathModal } from "./components/GoToPathModal";
 import {
   getCachedDirectory,
   invalidateCachedDirectory,
@@ -33,6 +34,7 @@ import type {
   PanelId,
   PanelState,
   PersistedAppState,
+  ResolvedGoToPath,
   SidebarLocations,
   SortConfig,
   TrackedPanelId,
@@ -207,6 +209,7 @@ export const App: React.FC = () => {
   const [inAppDrag, setInAppDrag] = useState<InAppFolderDrag | null>(null);
   const [osDragOverFavorites, setOsDragOverFavorites] = useState<boolean>(false);
   const [missingFavorite, setMissingFavorite] = useState<FavoriteFolder | null>(null);
+  const [goToPathOpen, setGoToPathOpen] = useState<boolean>(false);
   const [loading, setLoading] = useState<boolean>(true);
   const [emptyingTrash, setEmptyingTrash] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
@@ -832,14 +835,36 @@ export const App: React.FC = () => {
   const activePath = pendingPath ?? listing?.currentPath ?? "";
 
   const navigateTo = useCallback(
-    async (path: string, panelOverride?: PanelId) => {
+    async (path: string, panelOverride?: PanelId, selectPath?: string | null) => {
       const targetPanel = panelOverride ?? activePanelRef.current;
-      if (activePath === path && activePanelRef.current === targetPanel && !error) return;
+      const isSameDir =
+        normalizePathKey(activePath) === normalizePathKey(path) &&
+        activePanelRef.current === targetPanel &&
+        !error;
+
+      if (isSameDir) {
+        if (selectPath && listing) {
+          const selectKey = normalizePathKey(selectPath);
+          const matched = listing.entries.find((e) => normalizePathKey(e.path) === selectKey);
+          if (matched) {
+            setSelectedEntry(matched);
+          }
+        }
+        return;
+      }
+
       setRevealRequest(null);
       setExpandedPaths([]);
       setColumnPaths([]);
       const data = await fetchDirectory(path);
       if (data) {
+        if (selectPath) {
+          const selectKey = normalizePathKey(selectPath);
+          const matched = data.entries.find((e) => normalizePathKey(e.path) === selectKey);
+          if (matched) {
+            setSelectedEntry(matched);
+          }
+        }
         setHistory((prev) => {
           const next = prev.slice(0, historyIndex + 1);
           next.push({ path: data.currentPath, panel: targetPanel });
@@ -855,7 +880,61 @@ export const App: React.FC = () => {
         }
       }
     },
-    [activePath, error, fetchDirectory, historyIndex, updateTrackedPanelState]
+    [activePath, error, fetchDirectory, historyIndex, listing, updateTrackedPanelState]
+  );
+
+  const handleGoToPathSubmit = useCallback(
+    async (rawPath: string): Promise<string | null> => {
+      const trimmed = rawPath.trim();
+      if (!trimmed) {
+        return "Please enter a folder or file path.";
+      }
+
+      if (!isTauriRuntime()) {
+        const unquoted = trimmed.replace(/^["']|["']$/g, "").trim();
+        if (!unquoted) {
+          return "Please enter a folder or file path.";
+        }
+        const mockEntry = MOCK_PREVIEW_LISTING.entries.find(
+          (e) =>
+            normalizePathKey(e.path) === normalizePathKey(unquoted) ||
+            e.name.toLowerCase() === unquoted.toLowerCase()
+        );
+        if (unquoted === "~" || unquoted === MOCK_LOCATIONS.homePath) {
+          setGoToPathOpen(false);
+          await navigateTo("~");
+          return null;
+        }
+        if (mockEntry) {
+          setGoToPathOpen(false);
+          if (mockEntry.isDir) {
+            await navigateTo(mockEntry.path);
+          } else {
+            await navigateTo("~", undefined, mockEntry.path);
+          }
+          return null;
+        }
+        return `The folder "${unquoted}" can't be found.`;
+      }
+
+      const baseDir =
+        listing && !listing.currentPath.startsWith("virtual://")
+          ? listing.currentPath
+          : null;
+
+      try {
+        const resolved = await invoke<ResolvedGoToPath>("resolve_go_to_path", {
+          rawPath,
+          baseDir,
+        });
+        setGoToPathOpen(false);
+        await navigateTo(resolved.directoryPath, undefined, resolved.selectFilePath);
+        return null;
+      } catch (err) {
+        return typeof err === "string" ? err : String(err);
+      }
+    },
+    [listing, navigateTo]
   );
 
   const handleSelectPanel = useCallback(
@@ -1425,7 +1504,7 @@ export const App: React.FC = () => {
     };
   }, []);
 
-  // Keyboard support: Backspace or Alt+Left goes back; Ctrl+, opens Settings; dialog Escape/Enter handling
+  // Keyboard support: Ctrl/Cmd+Shift+G opens Go to Path; Ctrl+, opens Settings; Backspace or Alt+Left goes back; dialog Escape/Enter handling
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (missingFavorite) {
@@ -1446,11 +1525,32 @@ export const App: React.FC = () => {
         }
         return;
       }
+
       if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key === ",") {
         e.preventDefault();
         setSettingsOpen(true);
         return;
       }
+
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "g") {
+        e.preventDefault();
+        setGoToPathOpen(true);
+        return;
+      }
+
+      if (goToPathOpen) {
+        return;
+      }
+
+      const target = e.target as HTMLElement | null;
+      const isEditable =
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        Boolean(target?.isContentEditable);
+      if (isEditable) {
+        return;
+      }
+
       if ((e.altKey && e.key === "ArrowLeft") || (e.key === "Backspace" && !e.ctrlKey && !e.metaKey)) {
         e.preventDefault();
         void handleBack();
@@ -1461,7 +1561,7 @@ export const App: React.FC = () => {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [handleBack, handleForward, handleRemoveFavorite, missingFavorite, settingsOpen]);
+  }, [goToPathOpen, handleBack, handleForward, handleRemoveFavorite, missingFavorite, settingsOpen]);
 
   const isPendingNavigation = loading && pendingPath !== null;
   const displayTitle = isPendingNavigation
@@ -1511,6 +1611,7 @@ export const App: React.FC = () => {
           onCopyFile={(entry) => void handleCopyFile(entry)}
           onCopyPath={(entry) => void handleCopyPath(entry)}
           onNewFolder={() => void handleNewFolder()}
+          onGoToPath={() => setGoToPathOpen(true)}
           onToggleShowHidden={handleToggleShowHidden}
           onOpenInTerminal={() => void handleOpenInTerminal()}
           onCopyCurrentPath={() => void handleCopyCurrentPath()}
@@ -1592,6 +1693,12 @@ export const App: React.FC = () => {
           onClose={() => setSettingsOpen(false)}
         />
       )}
+
+      <GoToPathModal
+        isOpen={goToPathOpen}
+        onClose={() => setGoToPathOpen(false)}
+        onSubmit={handleGoToPathSubmit}
+      />
 
       {missingFavorite && (
         <div
