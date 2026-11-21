@@ -110,3 +110,8 @@ export interface ResolvedGoToPath {
   directoryPath: string;
   selectFilePath: string | null;
 }
+
+export interface ContextMenuResult {
+  invoked: boolean;
+  openInNewTab: boolean;
+}

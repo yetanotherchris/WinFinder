@@ -59,6 +59,7 @@ interface RevealRequest {
 }
 
 interface MainViewProps {
+  tabId?: string;
   currentPath: string;
   entries: FileEntry[];
   breadcrumbs: BreadcrumbItem[];
@@ -76,6 +77,7 @@ interface MainViewProps {
   emptyMessage: string | null;
   onSelect: (entry: FileEntry | null) => void;
   onOpenFolder: (path: string) => void;
+  onOpenFolderInNewTab?: (path: string) => void;
   onOpenItem: (entry: FileEntry) => void;
   onContextMenu: (entry: FileEntry) => void;
   onChangeSort: (next: SortConfig) => void;
@@ -142,6 +144,7 @@ function renderBreadcrumbIcon(crumb: BreadcrumbItem, index: number, homePath: st
 }
 
 export const MainView: React.FC<MainViewProps> = ({
+  tabId = "default",
   currentPath,
   entries,
   breadcrumbs,
@@ -159,6 +162,7 @@ export const MainView: React.FC<MainViewProps> = ({
   emptyMessage,
   onSelect,
   onOpenFolder,
+  onOpenFolderInNewTab,
   onOpenItem,
   onContextMenu,
   onChangeSort,
@@ -202,7 +206,7 @@ export const MainView: React.FC<MainViewProps> = ({
     if (!isDraggableFavoriteFolder(entry)) return {};
     return {
       onPointerDown: (e: React.PointerEvent) => {
-        if (e.button !== 0) return;
+        if (e.button !== 0 || e.ctrlKey || e.metaKey) return;
         if ((e.target as HTMLElement | null)?.closest(".list-disclosure-btn")) return;
         onStartFolderDrag?.({ name: entry.name, path: entry.path }, e);
       },
@@ -436,7 +440,7 @@ export const MainView: React.FC<MainViewProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [currentPath, viewMode, showHidden]);
+  }, [tabId, currentPath, viewMode, showHidden]);
 
   const toggleExpandFolder = async (folderPath: string) => {
     const key = normalizePathKey(folderPath);
@@ -1203,7 +1207,19 @@ export const MainView: React.FC<MainViewProps> = ({
                     {...getFolderDragProps(entry)}
                     onClick={(e) => {
                       e.stopPropagation();
+                      if (entry.isDir && (e.ctrlKey || e.metaKey)) {
+                        e.preventDefault();
+                        onOpenFolderInNewTab?.(entry.path);
+                        return;
+                      }
                       onSelect(entry);
+                    }}
+                    onAuxClick={(e) => {
+                      if (e.button === 1 && entry.isDir) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        onOpenFolderInNewTab?.(entry.path);
+                      }
                     }}
                     onContextMenu={(e) => {
                       e.preventDefault();
@@ -1307,7 +1323,22 @@ export const MainView: React.FC<MainViewProps> = ({
                           type="button"
                           className={`miller-row ${isSelected ? "selected" : ""} ${isTrail && !isSelected ? "trail" : ""}`}
                           {...getFolderDragProps(entry)}
-                          onClick={() => void handleColumnSelect(colIdx, entry)}
+                          onClick={(e) => {
+                            if (entry.isDir && (e.ctrlKey || e.metaKey)) {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              onOpenFolderInNewTab?.(entry.path);
+                              return;
+                            }
+                            void handleColumnSelect(colIdx, entry);
+                          }}
+                          onAuxClick={(e) => {
+                            if (e.button === 1 && entry.isDir) {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              onOpenFolderInNewTab?.(entry.path);
+                            }
+                          }}
                           onContextMenu={(e) => {
                             e.preventDefault();
                             e.stopPropagation();
@@ -1412,6 +1443,20 @@ export const MainView: React.FC<MainViewProps> = ({
               <div
                 className="gallery-hero"
                 {...getFolderDragProps(galleryActiveItem)}
+                onClick={(e) => {
+                  if (galleryActiveItem.isDir && (e.ctrlKey || e.metaKey)) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    onOpenFolderInNewTab?.(galleryActiveItem.path);
+                  }
+                }}
+                onAuxClick={(e) => {
+                  if (e.button === 1 && galleryActiveItem.isDir) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    onOpenFolderInNewTab?.(galleryActiveItem.path);
+                  }
+                }}
                 onContextMenu={(e) => {
                   e.preventDefault();
                   e.stopPropagation();
@@ -1467,7 +1512,22 @@ export const MainView: React.FC<MainViewProps> = ({
                   aria-selected={isSelected}
                   className={`gallery-thumb ${isSelected ? "selected" : ""}`}
                   {...getFolderDragProps(entry)}
-                  onClick={() => onSelect(entry)}
+                  onClick={(e) => {
+                    if (entry.isDir && (e.ctrlKey || e.metaKey)) {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      onOpenFolderInNewTab?.(entry.path);
+                      return;
+                    }
+                    onSelect(entry);
+                  }}
+                  onAuxClick={(e) => {
+                    if (e.button === 1 && entry.isDir) {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      onOpenFolderInNewTab?.(entry.path);
+                    }
+                  }}
                   onContextMenu={(e) => {
                     e.preventDefault();
                     e.stopPropagation();
@@ -1516,7 +1576,19 @@ export const MainView: React.FC<MainViewProps> = ({
               {...getFolderDragProps(entry)}
               onClick={(e) => {
                 e.stopPropagation();
+                if (entry.isDir && (e.ctrlKey || e.metaKey)) {
+                  e.preventDefault();
+                  onOpenFolderInNewTab?.(entry.path);
+                  return;
+                }
                 onSelect(entry);
+              }}
+              onAuxClick={(e) => {
+                if (e.button === 1 && entry.isDir) {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  onOpenFolderInNewTab?.(entry.path);
+                }
               }}
               onContextMenu={(e) => {
                 e.preventDefault();
@@ -1723,8 +1795,19 @@ export const MainView: React.FC<MainViewProps> = ({
                 type="button"
                 className={`pathbar-crumb ${isLast ? "current" : ""}`}
                 title={crumb.path}
-                onClick={() => {
+                onClick={(e) => {
+                  if (e.ctrlKey || e.metaKey) {
+                    e.preventDefault();
+                    onOpenFolderInNewTab?.(crumb.path);
+                    return;
+                  }
                   if (!isLast || isSearchView) onOpenFolder(crumb.path);
+                }}
+                onAuxClick={(e) => {
+                  if (e.button === 1) {
+                    e.preventDefault();
+                    onOpenFolderInNewTab?.(crumb.path);
+                  }
                 }}
               >
                 {renderBreadcrumbIcon(crumb, index, homePath)}

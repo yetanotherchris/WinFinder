@@ -5,6 +5,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { AlertTriangle } from "lucide-react";
 import { Sidebar } from "./components/Sidebar";
 import { Toolbar } from "./components/Toolbar";
+import { TabBar, type TabBarItem } from "./components/TabBar";
 import { MainView } from "./components/MainView";
 import { FileIcon } from "./components/FileIcon";
 import { SettingsDialog } from "./components/SettingsDialog";
@@ -30,6 +31,7 @@ import {
 import type {
   AppSettings,
   BitlockerNotice,
+  ContextMenuResult,
   CustomFavoritePanelId,
   DirectoryListing,
   FavoriteFolder,
@@ -166,6 +168,61 @@ interface HistoryEntry {
   panel: PanelId;
 }
 
+interface RevealRequest {
+  anchorRoot: string;
+  path: string;
+  seq: number;
+}
+
+interface TabState {
+  id: string;
+  activePanel: PanelId;
+  listing: DirectoryListing | null;
+  pendingPath: string | null;
+  history: HistoryEntry[];
+  historyIndex: number;
+  selectedEntry: FileEntry | null;
+  viewMode: ViewMode;
+  sortConfig: SortConfig;
+  expandedPaths: string[];
+  columnPaths: string[];
+  revealRequest: RevealRequest | null;
+  loading: boolean;
+  error: string | null;
+  bitlockerNotice: BitlockerNotice | null;
+  searchOpen: boolean;
+  searchQuery: string;
+  searchListing: DirectoryListing | null;
+  searchLoading: boolean;
+  searchError: string | null;
+}
+
+function createTabState(id: string, overrides?: Partial<TabState>): TabState {
+  return {
+    id,
+    activePanel: "home",
+    listing: null,
+    pendingPath: null,
+    history: [],
+    historyIndex: -1,
+    selectedEntry: null,
+    viewMode: DEFAULT_VIEW_MODE,
+    sortConfig: DEFAULT_SORT,
+    expandedPaths: [],
+    columnPaths: [],
+    revealRequest: null,
+    loading: true,
+    error: null,
+    bitlockerNotice: null,
+    searchOpen: false,
+    searchQuery: "",
+    searchListing: null,
+    searchLoading: false,
+    searchError: null,
+    ...overrides,
+  };
+}
+
 const isTauriRuntime = () =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -245,6 +302,19 @@ function matchPanelForPath(
   return "drives";
 }
 
+function panelForAnyPath(
+  targetPath: string,
+  locs: SidebarLocations | null,
+  customFavorites: FavoriteFolder[]
+): PanelId {
+  if (targetPath === "virtual://recents") return "recents";
+  if (targetPath === "virtual://applications") return "applications";
+  if (targetPath === "virtual://computer") return "drives";
+  if (targetPath === "virtual://network") return "network";
+  if (targetPath === "virtual://trash") return "trash";
+  return matchPanelForPath(targetPath, locs, customFavorites);
+}
+
 function labelForPendingPath(targetPath?: string, locations?: SidebarLocations | null): string {
   if (!targetPath) return locations?.homeName || "Home";
   if (targetPath === "virtual://recents") return "Recents";
@@ -258,23 +328,78 @@ function labelForPendingPath(targetPath?: string, locations?: SidebarLocations |
 
 export const App: React.FC = () => {
   const [locations, setLocations] = useState<SidebarLocations | null>(null);
-  const [listing, setListing] = useState<DirectoryListing | null>(null);
-  const [pendingPath, setPendingPath] = useState<string | null>(null);
-  const [activePanel, setActivePanel] = useState<PanelId>("home");
-  const [history, setHistory] = useState<HistoryEntry[]>([]);
-  const [historyIndex, setHistoryIndex] = useState<number>(-1);
-  const [selectedEntry, setSelectedEntry] = useState<FileEntry | null>(null);
+  const [tabs, setTabs] = useState<TabState[]>(() => [createTabState("tab-1")]);
+  const [activeTabId, setActiveTabId] = useState<string>("tab-1");
+  const [tabBarPinned, setTabBarPinned] = useState<boolean>(false);
+  const nextTabIdRef = useRef<number>(2);
+  const tabsRef = useRef<TabState[]>(tabs);
+  tabsRef.current = tabs;
+  const activeTabIdRef = useRef<string>(activeTabId);
+  activeTabIdRef.current = activeTabId;
+
+  const activeTab = tabs.find((t) => t.id === activeTabId) ?? tabs[0];
+  const listing = activeTab.listing;
+  const pendingPath = activeTab.pendingPath;
+  const activePanel = activeTab.activePanel;
+  const history = activeTab.history;
+  const historyIndex = activeTab.historyIndex;
+  const selectedEntry = activeTab.selectedEntry;
+  const viewMode = activeTab.viewMode;
+  const sortConfig = activeTab.sortConfig;
+  const expandedPaths = activeTab.expandedPaths;
+  const columnPaths = activeTab.columnPaths;
+  const revealRequest = activeTab.revealRequest;
+  const loading = activeTab.loading;
+  const error = activeTab.error;
+  const bitlockerNotice = activeTab.bitlockerNotice;
+  const searchOpen = activeTab.searchOpen;
+  const searchQuery = activeTab.searchQuery;
+  const searchListing = activeTab.searchListing;
+  const searchLoading = activeTab.searchLoading;
+  const searchError = activeTab.searchError;
+
+  const updateTab = useCallback(
+    (tabId: string, updater: Partial<TabState> | ((prev: TabState) => TabState)) => {
+      setTabs((prev) =>
+        prev.map((tab) => {
+          if (tab.id !== tabId) return tab;
+          return typeof updater === "function" ? updater(tab) : { ...tab, ...updater };
+        })
+      );
+    },
+    []
+  );
+
+  const updateActiveTab = useCallback(
+    (updater: Partial<TabState> | ((prev: TabState) => TabState)) => {
+      updateTab(activeTabIdRef.current, updater);
+    },
+    [updateTab]
+  );
+
+  const setSelectedEntry = useCallback(
+    (entry: FileEntry | null) => {
+      updateActiveTab({ selectedEntry: entry });
+    },
+    [updateActiveTab]
+  );
+
+  const setError = useCallback(
+    (nextError: string | null) => {
+      updateActiveTab({ error: nextError });
+    },
+    [updateActiveTab]
+  );
+
+  const setBitlockerNotice = useCallback(
+    (notice: BitlockerNotice | null) => {
+      updateActiveTab({ bitlockerNotice: notice });
+    },
+    [updateActiveTab]
+  );
+
   const [sidebarWidth, setSidebarWidth] = useState<number>(204);
-  const [viewMode, setViewMode] = useState<ViewMode>(DEFAULT_VIEW_MODE);
   const [showHidden, setShowHidden] = useState<boolean>(false);
-  const [sortConfig, setSortConfig] = useState<SortConfig>(DEFAULT_SORT);
-  const [expandedPaths, setExpandedPaths] = useState<string[]>([]);
-  const [columnPaths, setColumnPaths] = useState<string[]>([]);
-  const [revealRequest, setRevealRequest] = useState<{
-    anchorRoot: string;
-    path: string;
-    seq: number;
-  } | null>(null);
   const [customFavorites, setCustomFavorites] = useState<FavoriteFolder[]>([]);
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [settingsOpen, setSettingsOpen] = useState<boolean>(false);
@@ -283,19 +408,11 @@ export const App: React.FC = () => {
   const [osDragOverFavorites, setOsDragOverFavorites] = useState<boolean>(false);
   const [missingFavorite, setMissingFavorite] = useState<FavoriteFolder | null>(null);
   const [goToPathOpen, setGoToPathOpen] = useState<boolean>(false);
-  const [loading, setLoading] = useState<boolean>(true);
   const [emptyingTrash, setEmptyingTrash] = useState<boolean>(false);
-  const [error, setError] = useState<string | null>(null);
-  const [bitlockerNotice, setBitlockerNotice] = useState<BitlockerNotice | null>(null);
   const unlockingDriveRef = useRef<string | null>(null);
-  const [searchOpen, setSearchOpen] = useState<boolean>(false);
-  const [searchQuery, setSearchQuery] = useState<string>("");
-  const [searchListing, setSearchListing] = useState<DirectoryListing | null>(null);
-  const [searchLoading, setSearchLoading] = useState<boolean>(false);
-  const [searchError, setSearchError] = useState<string | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
-  const searchRequestIdRef = useRef<number>(0);
-  const searchDebounceRef = useRef<number | null>(null);
+  const searchRequestIdByTabRef = useRef<Map<string, number>>(new Map());
+  const searchDebounceByTabRef = useRef<Map<string, number>>(new Map());
   const mockTrashEntriesRef = useRef<FileEntry[]>([
     {
       name: "Old Draft.docx",
@@ -318,8 +435,8 @@ export const App: React.FC = () => {
       iconDataUrl: null,
     },
   ]);
-  const requestIdRef = useRef(0);
-  const loadingTimerRef = useRef<number | null>(null);
+  const requestIdByTabRef = useRef<Map<string, number>>(new Map());
+  const loadingTimerByTabRef = useRef<Map<string, number>>(new Map());
   const favoritesSectionRef = useRef<HTMLDivElement | null>(null);
   const dragCleanupRef = useRef<(() => void) | null>(null);
   const locationsRef = useRef<SidebarLocations | null>(locations);
@@ -450,8 +567,15 @@ export const App: React.FC = () => {
       ) {
         activeWasRemoved = true;
         activePanelRef.current = "home";
-        setActivePanel("home");
       }
+      setTabs((prev) =>
+        prev.map((tab) =>
+          tab.activePanel.startsWith("fav:") &&
+          normalizePathKey(tab.activePanel.slice(4)) === targetKey
+            ? { ...tab, activePanel: "home" }
+            : tab
+        )
+      );
       if (
         lastTrackedPanelRef.current.startsWith("fav:") &&
         normalizePathKey(lastTrackedPanelRef.current.slice(4)) === targetKey
@@ -688,24 +812,30 @@ export const App: React.FC = () => {
     async (
       targetPath?: string,
       options?: {
+        tabId?: string;
         overrideShowHidden?: boolean;
         forceRefresh?: boolean;
         fallbackRoot?: string;
         fallbackPanel?: TrackedPanelId;
       }
     ): Promise<DirectoryListing | null> => {
-      const reqId = ++requestIdRef.current;
+      const tabId = options?.tabId ?? activeTabIdRef.current;
+      const reqId = (requestIdByTabRef.current.get(tabId) ?? 0) + 1;
+      requestIdByTabRef.current.set(tabId, reqId);
       const includeHidden = options?.overrideShowHidden ?? showHiddenRef.current;
       const forceRefresh = options?.forceRefresh ?? false;
 
-      if (loadingTimerRef.current !== null) {
-        window.clearTimeout(loadingTimerRef.current);
-        loadingTimerRef.current = null;
+      const existingTimer = loadingTimerByTabRef.current.get(tabId);
+      if (existingTimer !== undefined) {
+        window.clearTimeout(existingTimer);
+        loadingTimerByTabRef.current.delete(tabId);
       }
 
-      setError(null);
-      setBitlockerNotice(null);
-      setSelectedEntry(null);
+      updateTab(tabId, {
+        error: null,
+        bitlockerNotice: null,
+        selectedEntry: null,
+      });
 
       if (!isTauriRuntime()) {
         if (targetPath === "virtual://trash") {
@@ -718,15 +848,33 @@ export const App: React.FC = () => {
             entries: [...mockTrashEntriesRef.current],
             emptyMessage: "Trash is empty",
           };
-          setListing(mockTrashListing);
-          setPendingPath(null);
-          setLoading(false);
+          updateTab(tabId, {
+            listing: mockTrashListing,
+            pendingPath: null,
+            loading: false,
+          });
           return mockTrashListing;
         }
-        setListing(MOCK_PREVIEW_LISTING);
-        setPendingPath(null);
-        setLoading(false);
-        return MOCK_PREVIEW_LISTING;
+        const mockListing: DirectoryListing =
+          targetPath && targetPath !== "~"
+            ? {
+                ...MOCK_PREVIEW_LISTING,
+                currentPath: targetPath,
+                currentName: labelForPendingPath(targetPath, locationsRef.current),
+                breadcrumbs: targetPath.startsWith("virtual://")
+                  ? [{ name: labelForPendingPath(targetPath, locationsRef.current), path: targetPath }]
+                  : [
+                      { name: "Home", path: "~" },
+                      { name: labelForPendingPath(targetPath, locationsRef.current), path: targetPath },
+                    ],
+              }
+            : MOCK_PREVIEW_LISTING;
+        updateTab(tabId, {
+          listing: mockListing,
+          pendingPath: null,
+          loading: false,
+        });
+        return mockListing;
       }
 
       const cached =
@@ -736,9 +884,11 @@ export const App: React.FC = () => {
 
       if (cached) {
         // Stale-while-revalidate: render cached directory immediately with zero flicker
-        setListing(cached);
-        setPendingPath(null);
-        setLoading(false);
+        updateTab(tabId, {
+          listing: cached,
+          pendingPath: null,
+          loading: false,
+        });
 
         void (async () => {
           try {
@@ -747,16 +897,16 @@ export const App: React.FC = () => {
               showHidden: includeHidden,
             });
             setCachedDirectory(targetPath ?? fresh.currentPath, includeHidden, fresh);
-            if (reqId !== requestIdRef.current) return;
+            if (reqId !== requestIdByTabRef.current.get(tabId)) return;
             if (!listingsEqual(cached, fresh)) {
-              setListing(fresh);
+              updateTab(tabId, { listing: fresh });
             }
           } catch {
             if (targetPath) invalidateCachedDirectory(targetPath);
-            if (reqId !== requestIdRef.current) return;
+            if (reqId !== requestIdByTabRef.current.get(tabId)) return;
             if (options?.fallbackRoot && targetPath) {
               const recovered = await resolvePanelTarget(targetPath, options.fallbackRoot);
-              if (reqId === requestIdRef.current && recovered !== targetPath) {
+              if (reqId === requestIdByTabRef.current.get(tabId) && recovered !== targetPath) {
                 if (options.fallbackPanel) {
                   updateTrackedPanelState(options.fallbackPanel, {
                     lastPath: recovered,
@@ -765,6 +915,7 @@ export const App: React.FC = () => {
                   });
                 }
                 void fetchDirectory(recovered, {
+                  tabId,
                   overrideShowHidden: includeHidden,
                   forceRefresh: true,
                 });
@@ -777,47 +928,56 @@ export const App: React.FC = () => {
       }
 
       // Cache miss: defer showing spinner by 120ms so fast local folders (including empty ones) don't flash
-      loadingTimerRef.current = window.setTimeout(() => {
-        if (reqId === requestIdRef.current) {
-          setPendingPath(targetPath ?? "");
-          setLoading(true);
+      const timerId = window.setTimeout(() => {
+        if (reqId === requestIdByTabRef.current.get(tabId)) {
+          updateTab(tabId, {
+            pendingPath: targetPath ?? "",
+            loading: true,
+          });
         }
       }, 120);
+      loadingTimerByTabRef.current.set(tabId, timerId);
 
       try {
         const result = await invoke<DirectoryListing>("list_directory", {
           path: targetPath ?? null,
           showHidden: includeHidden,
         });
-        if (loadingTimerRef.current !== null) {
-          window.clearTimeout(loadingTimerRef.current);
-          loadingTimerRef.current = null;
+        const activeTimer = loadingTimerByTabRef.current.get(tabId);
+        if (activeTimer !== undefined) {
+          window.clearTimeout(activeTimer);
+          loadingTimerByTabRef.current.delete(tabId);
         }
         setCachedDirectory(targetPath ?? result.currentPath, includeHidden, result);
-        if (reqId !== requestIdRef.current) {
+        if (reqId !== requestIdByTabRef.current.get(tabId)) {
           return null;
         }
-        setListing(result);
-        setPendingPath(null);
-        setLoading(false);
+        updateTab(tabId, {
+          listing: result,
+          pendingPath: null,
+          loading: false,
+        });
         return result;
       } catch (err) {
-        if (loadingTimerRef.current !== null) {
-          window.clearTimeout(loadingTimerRef.current);
-          loadingTimerRef.current = null;
+        const activeTimer = loadingTimerByTabRef.current.get(tabId);
+        if (activeTimer !== undefined) {
+          window.clearTimeout(activeTimer);
+          loadingTimerByTabRef.current.delete(tabId);
         }
-        if (reqId !== requestIdRef.current) {
+        if (reqId !== requestIdByTabRef.current.get(tabId)) {
           return null;
         }
         const lockedDriveRoot = parseBitlockerLockedDrive(err);
         if (lockedDriveRoot) {
-          setPendingPath(null);
-          setLoading(false);
+          updateTab(tabId, {
+            pendingPath: null,
+            loading: false,
+          });
           const unlocked = await handleUnlockBitlockerDrive(
             targetPath ?? lockedDriveRoot,
             lockedDriveRoot
           );
-          if (reqId !== requestIdRef.current) {
+          if (reqId !== requestIdByTabRef.current.get(tabId)) {
             return null;
           }
           if (unlocked) {
@@ -831,34 +991,38 @@ export const App: React.FC = () => {
                 includeHidden,
                 retried
               );
-              if (reqId !== requestIdRef.current) {
+              if (reqId !== requestIdByTabRef.current.get(tabId)) {
                 return null;
               }
-              setListing(retried);
-              setPendingPath(null);
-              setLoading(false);
+              updateTab(tabId, {
+                listing: retried,
+                pendingPath: null,
+                loading: false,
+              });
               return retried;
             } catch (retryErr) {
-              if (reqId !== requestIdRef.current) {
+              if (reqId !== requestIdByTabRef.current.get(tabId)) {
                 return null;
               }
-              setError(
-                typeof retryErr === "string" ? retryErr : String(retryErr)
-              );
-              setPendingPath(null);
-              setLoading(false);
+              updateTab(tabId, {
+                error: typeof retryErr === "string" ? retryErr : String(retryErr),
+                pendingPath: null,
+                loading: false,
+              });
               return null;
             }
           }
           return null;
         }
-        setError(typeof err === "string" ? err : String(err));
-        setPendingPath(null);
-        setLoading(false);
+        updateTab(tabId, {
+          error: typeof err === "string" ? err : String(err),
+          pendingPath: null,
+          loading: false,
+        });
         return null;
       }
     },
-    [handleUnlockBitlockerDrive, resolvePanelTarget, updateTrackedPanelState]
+    [handleUnlockBitlockerDrive, resolvePanelTarget, updateTab, updateTrackedPanelState]
   );
 
   // Initial load: resolve sidebar locations, restore persisted state & open last panel/folder
@@ -946,16 +1110,20 @@ export const App: React.FC = () => {
           lastTrackedPanelRef.current = persisted.activePanel;
         }
         activePanelRef.current = matchedPanel;
-        setActivePanel(matchedPanel);
-        setViewMode(initialViewMode);
-        setSortConfig(initialSort);
-        setExpandedPaths([]);
-        setColumnPaths([]);
+        updateTab("tab-1", {
+          activePanel: matchedPanel,
+          viewMode: initialViewMode,
+          sortConfig: initialSort,
+          expandedPaths: [],
+          columnPaths: [],
+        });
 
-        const data = await fetchDirectory(cliInitialPath);
+        const data = await fetchDirectory(cliInitialPath, { tabId: "tab-1" });
         if (active && data) {
-          setHistory([{ path: data.currentPath, panel: matchedPanel }]);
-          setHistoryIndex(0);
+          updateTab("tab-1", {
+            history: [{ path: data.currentPath, panel: matchedPanel }],
+            historyIndex: 0,
+          });
           if (isTrackedPanel(matchedPanel)) {
             updateTrackedPanelState(matchedPanel, {
               viewMode: initialViewMode,
@@ -1019,16 +1187,20 @@ export const App: React.FC = () => {
 
       lastTrackedPanelRef.current = initialPanel;
       activePanelRef.current = initialPanel;
-      setActivePanel(initialPanel);
-      setViewMode(initialViewMode);
-      setSortConfig(initialSort);
-      setExpandedPaths(initialExpanded);
-      setColumnPaths(initialColumns);
+      updateTab("tab-1", {
+        activePanel: initialPanel,
+        viewMode: initialViewMode,
+        sortConfig: initialSort,
+        expandedPaths: initialExpanded,
+        columnPaths: initialColumns,
+      });
 
-      const data = await fetchDirectory(targetPath || undefined);
+      const data = await fetchDirectory(targetPath || undefined, { tabId: "tab-1" });
       if (active && data) {
-        setHistory([{ path: data.currentPath, panel: initialPanel }]);
-        setHistoryIndex(0);
+        updateTab("tab-1", {
+          history: [{ path: data.currentPath, panel: initialPanel }],
+          historyIndex: 0,
+        });
         updateTrackedPanelState(initialPanel, {
           viewMode: initialViewMode,
           sort: initialSort,
@@ -1041,7 +1213,7 @@ export const App: React.FC = () => {
     return () => {
       active = false;
     };
-  }, [fetchDirectory, resolvePanelTarget, updateTrackedPanelState]);
+  }, [fetchDirectory, resolvePanelTarget, updateTab, updateTrackedPanelState]);
 
   // Native OS drag-and-drop into the Favorites section (Tauri Webview)
   useEffect(() => {
@@ -1112,126 +1284,164 @@ export const App: React.FC = () => {
   const trimmedSearch = searchQuery.trim();
   const isSearchMode = searchOpen && trimmedSearch.length > 0;
 
-  const clearSearch = useCallback(() => {
-    searchRequestIdRef.current += 1;
-    if (searchDebounceRef.current !== null) {
-      window.clearTimeout(searchDebounceRef.current);
-      searchDebounceRef.current = null;
-    }
-    setSearchOpen(false);
-    setSearchQuery("");
-    setSearchListing(null);
-    setSearchLoading(false);
-    setSearchError(null);
-    setSelectedEntry(null);
-  }, []);
+  const clearSearch = useCallback(
+    (tabId?: string) => {
+      const targetTabId = tabId ?? activeTabIdRef.current;
+      searchRequestIdByTabRef.current.set(
+        targetTabId,
+        (searchRequestIdByTabRef.current.get(targetTabId) ?? 0) + 1
+      );
+      const pendingDebounce = searchDebounceByTabRef.current.get(targetTabId);
+      if (pendingDebounce !== undefined) {
+        window.clearTimeout(pendingDebounce);
+        searchDebounceByTabRef.current.delete(targetTabId);
+      }
+      updateTab(targetTabId, {
+        searchOpen: false,
+        searchQuery: "",
+        searchListing: null,
+        searchLoading: false,
+        searchError: null,
+        selectedEntry: null,
+      });
+    },
+    [updateTab]
+  );
 
   const handleOpenSearch = useCallback(() => {
-    setSearchOpen(true);
+    updateActiveTab({ searchOpen: true });
     requestAnimationFrame(() => {
       searchInputRef.current?.focus();
       searchInputRef.current?.select();
     });
-  }, []);
+  }, [updateActiveTab]);
 
   const runSearch = useCallback(
-    async (rawQuery: string, overrideShowHidden?: boolean) => {
+    async (rawQuery: string, overrideShowHidden?: boolean, tabIdOverride?: string) => {
+      const tabId = tabIdOverride ?? activeTabIdRef.current;
       const q = rawQuery.trim();
-      const reqId = ++searchRequestIdRef.current;
+      const reqId = (searchRequestIdByTabRef.current.get(tabId) ?? 0) + 1;
+      searchRequestIdByTabRef.current.set(tabId, reqId);
       if (!q) {
-        setSearchListing(null);
-        setSearchLoading(false);
-        setSearchError(null);
+        updateTab(tabId, {
+          searchListing: null,
+          searchLoading: false,
+          searchError: null,
+        });
         return;
       }
 
+      const tab = tabsRef.current.find((t) => t.id === tabId);
+      const tabListing = tab?.listing ?? listingRef.current;
       const scopePath =
-        listing && listing.currentPath && !listing.currentPath.startsWith("virtual://")
-          ? listing.currentPath
+        tabListing && tabListing.currentPath && !tabListing.currentPath.startsWith("virtual://")
+          ? tabListing.currentPath
           : (locationsRef.current?.homePath ?? null);
       const includeHidden = overrideShowHidden ?? showHiddenRef.current;
 
-      setSearchError(null);
-      setSelectedEntry(null);
+      updateTab(tabId, {
+        searchError: null,
+        selectedEntry: null,
+      });
 
       if (!isTauriRuntime()) {
         const lower = q.toLowerCase();
         const matches = MOCK_PREVIEW_LISTING.entries.filter((e) =>
           e.name.toLowerCase().includes(lower)
         );
-        setSearchListing({
-          currentPath: `virtual://search?q=${q}`,
-          currentName: `Search: "${q}"`,
-          homePath: "~",
-          homeName: "Home",
-          breadcrumbs: listing?.breadcrumbs ?? MOCK_PREVIEW_LISTING.breadcrumbs,
-          entries: matches,
-          emptyMessage: `No items matching "${q}"`,
+        updateTab(tabId, {
+          searchListing: {
+            currentPath: `virtual://search?q=${q}`,
+            currentName: `Search: "${q}"`,
+            homePath: "~",
+            homeName: "Home",
+            breadcrumbs: tabListing?.breadcrumbs ?? MOCK_PREVIEW_LISTING.breadcrumbs,
+            entries: matches,
+            emptyMessage: `No items matching "${q}"`,
+          },
+          searchLoading: false,
         });
-        setSearchLoading(false);
         return;
       }
 
-      setSearchLoading(true);
+      updateTab(tabId, { searchLoading: true });
       try {
         const result = await invoke<DirectoryListing>("search_directory", {
           query: q,
           scopePath,
           showHidden: includeHidden,
         });
-        if (reqId !== searchRequestIdRef.current) return;
-        setSearchListing(result);
-        setSearchLoading(false);
+        if (reqId !== searchRequestIdByTabRef.current.get(tabId)) return;
+        updateTab(tabId, {
+          searchListing: result,
+          searchLoading: false,
+        });
       } catch (err) {
-        if (reqId !== searchRequestIdRef.current) return;
-        setSearchError(typeof err === "string" ? err : String(err));
-        setSearchLoading(false);
+        if (reqId !== searchRequestIdByTabRef.current.get(tabId)) return;
+        updateTab(tabId, {
+          searchError: typeof err === "string" ? err : String(err),
+          searchLoading: false,
+        });
       }
     },
-    [listing]
+    [updateTab]
   );
 
   const handleSearchQueryChange = useCallback(
     (next: string) => {
-      setSearchQuery(next);
-      if (searchDebounceRef.current !== null) {
-        window.clearTimeout(searchDebounceRef.current);
-        searchDebounceRef.current = null;
+      const tabId = activeTabIdRef.current;
+      updateTab(tabId, { searchQuery: next });
+      const pendingDebounce = searchDebounceByTabRef.current.get(tabId);
+      if (pendingDebounce !== undefined) {
+        window.clearTimeout(pendingDebounce);
+        searchDebounceByTabRef.current.delete(tabId);
       }
       if (!next.trim()) {
-        searchRequestIdRef.current += 1;
-        setSearchListing(null);
-        setSearchLoading(false);
-        setSearchError(null);
+        searchRequestIdByTabRef.current.set(
+          tabId,
+          (searchRequestIdByTabRef.current.get(tabId) ?? 0) + 1
+        );
+        updateTab(tabId, {
+          searchListing: null,
+          searchLoading: false,
+          searchError: null,
+        });
         return;
       }
-      searchDebounceRef.current = window.setTimeout(() => {
-        searchDebounceRef.current = null;
-        void runSearch(next);
+      const timerId = window.setTimeout(() => {
+        searchDebounceByTabRef.current.delete(tabId);
+        void runSearch(next, undefined, tabId);
       }, 280);
+      searchDebounceByTabRef.current.set(tabId, timerId);
     },
-    [runSearch]
+    [runSearch, updateTab]
   );
 
   const handleSearchSubmit = useCallback(() => {
-    if (searchDebounceRef.current !== null) {
-      window.clearTimeout(searchDebounceRef.current);
-      searchDebounceRef.current = null;
+    const tabId = activeTabIdRef.current;
+    const pendingDebounce = searchDebounceByTabRef.current.get(tabId);
+    if (pendingDebounce !== undefined) {
+      window.clearTimeout(pendingDebounce);
+      searchDebounceByTabRef.current.delete(tabId);
     }
-    void runSearch(searchQuery);
+    void runSearch(searchQuery, undefined, tabId);
   }, [runSearch, searchQuery]);
 
   useEffect(() => {
+    const loadingTimers = loadingTimerByTabRef.current;
+    const searchTimers = searchDebounceByTabRef.current;
     return () => {
-      if (searchDebounceRef.current !== null) {
-        window.clearTimeout(searchDebounceRef.current);
-      }
+      loadingTimers.forEach((timerId) => window.clearTimeout(timerId));
+      loadingTimers.clear();
+      searchTimers.forEach((timerId) => window.clearTimeout(timerId));
+      searchTimers.clear();
     };
   }, []);
 
   const navigateTo = useCallback(
     async (path: string, panelOverride?: PanelId, selectPath?: string | null) => {
-      clearSearch();
+      const tabId = activeTabIdRef.current;
+      clearSearch(tabId);
       const targetPanel = panelOverride ?? activePanelRef.current;
       const isSameDir =
         normalizePathKey(activePath) === normalizePathKey(path) &&
@@ -1243,29 +1453,34 @@ export const App: React.FC = () => {
           const selectKey = normalizePathKey(selectPath);
           const matched = listing.entries.find((e) => normalizePathKey(e.path) === selectKey);
           if (matched) {
-            setSelectedEntry(matched);
+            updateTab(tabId, { selectedEntry: matched });
           }
         }
         return;
       }
-      setRevealRequest(null);
-      setExpandedPaths([]);
-      setColumnPaths([]);
-      const data = await fetchDirectory(path);
+      updateTab(tabId, {
+        revealRequest: null,
+        expandedPaths: [],
+        columnPaths: [],
+      });
+      const data = await fetchDirectory(path, { tabId });
       if (data) {
+        let matchedEntry: FileEntry | null = null;
         if (selectPath) {
           const selectKey = normalizePathKey(selectPath);
-          const matched = data.entries.find((e) => normalizePathKey(e.path) === selectKey);
-          if (matched) {
-            setSelectedEntry(matched);
-          }
+          matchedEntry =
+            data.entries.find((e) => normalizePathKey(e.path) === selectKey) ?? null;
         }
-        setHistory((prev) => {
-          const next = prev.slice(0, historyIndex + 1);
-          next.push({ path: data.currentPath, panel: targetPanel });
-          return next;
+        updateTab(tabId, (prev) => {
+          const nextHistory = prev.history.slice(0, prev.historyIndex + 1);
+          nextHistory.push({ path: data.currentPath, panel: targetPanel });
+          return {
+            ...prev,
+            selectedEntry: matchedEntry ?? prev.selectedEntry,
+            history: nextHistory,
+            historyIndex: prev.historyIndex + 1,
+          };
         });
-        setHistoryIndex((idx) => idx + 1);
         if (isTrackedPanel(targetPanel)) {
           const rootPath = getRootPathForPanel(targetPanel, locationsRef.current);
           const withinRoot =
@@ -1278,7 +1493,7 @@ export const App: React.FC = () => {
         }
       }
     },
-    [activePath, clearSearch, error, fetchDirectory, historyIndex, listing, updateTrackedPanelState]
+    [activePath, clearSearch, error, fetchDirectory, listing, updateTab, updateTrackedPanelState]
   );
 
   const handleGoToPathSubmit = useCallback(
@@ -1337,7 +1552,8 @@ export const App: React.FC = () => {
 
   const handleSelectPanel = useCallback(
     async (panel: PanelId) => {
-      clearSearch();
+      const tabId = activeTabIdRef.current;
+      clearSearch(tabId);
       const rootPath = getRootPathForPanel(panel, locations);
       if (rootPath === null) return;
 
@@ -1368,8 +1584,10 @@ export const App: React.FC = () => {
 
       const wasSamePanel = activePanelRef.current === panel;
       activePanelRef.current = panel;
-      setActivePanel(panel);
-      setRevealRequest(null);
+      updateTab(tabId, {
+        activePanel: panel,
+        revealRequest: null,
+      });
 
       if (isTrackedPanel(panel)) {
         const saved = panelStatesRef.current[panel];
@@ -1377,8 +1595,10 @@ export const App: React.FC = () => {
         const nextSort = saved?.sort ?? DEFAULT_SORT;
         viewModeRef.current = nextViewMode;
         sortConfigRef.current = nextSort;
-        setViewMode(nextViewMode);
-        setSortConfig(nextSort);
+        updateTab(tabId, {
+          viewMode: nextViewMode,
+          sortConfig: nextSort,
+        });
 
         // Clicking the already-active panel while inside a subfolder (or outside its root) returns to its root.
         // Switching to a tracked panel only restores saved.lastPath if it lies within that panel's root subtree.
@@ -1416,20 +1636,26 @@ export const App: React.FC = () => {
         );
         const nextExpanded = restoreSubState ? (saved?.expandedPaths ?? []) : [];
         const nextColumns = restoreSubState ? (saved?.columnPaths ?? []) : [];
-        setExpandedPaths(nextExpanded);
-        setColumnPaths(nextColumns);
+        updateTab(tabId, {
+          expandedPaths: nextExpanded,
+          columnPaths: nextColumns,
+        });
 
         const data = await fetchDirectory(targetPath || undefined, {
+          tabId,
           fallbackRoot: rootPath,
           fallbackPanel: panel,
         });
         if (data) {
-          setHistory((prev) => {
-            const next = prev.slice(0, historyIndex + 1);
-            next.push({ path: data.currentPath, panel });
-            return next;
+          updateTab(tabId, (prev) => {
+            const nextHistory = prev.history.slice(0, prev.historyIndex + 1);
+            nextHistory.push({ path: data.currentPath, panel });
+            return {
+              ...prev,
+              history: nextHistory,
+              historyIndex: prev.historyIndex + 1,
+            };
           });
-          setHistoryIndex((idx) => idx + 1);
           updateTrackedPanelState(panel, {
             viewMode: nextViewMode,
             sort: nextSort,
@@ -1445,19 +1671,24 @@ export const App: React.FC = () => {
         const nextSort = ephemeral?.sort ?? DEFAULT_SORT;
         viewModeRef.current = nextViewMode;
         sortConfigRef.current = nextSort;
-        setViewMode(nextViewMode);
-        setSortConfig(nextSort);
-        setExpandedPaths([]);
-        setColumnPaths([]);
+        updateTab(tabId, {
+          viewMode: nextViewMode,
+          sortConfig: nextSort,
+          expandedPaths: [],
+          columnPaths: [],
+        });
         if (normalizePathKey(activePath) === normalizePathKey(rootPath) && !error) return;
-        const data = await fetchDirectory(rootPath);
+        const data = await fetchDirectory(rootPath, { tabId });
         if (data) {
-          setHistory((prev) => {
-            const next = prev.slice(0, historyIndex + 1);
-            next.push({ path: data.currentPath, panel });
-            return next;
+          updateTab(tabId, (prev) => {
+            const nextHistory = prev.history.slice(0, prev.historyIndex + 1);
+            nextHistory.push({ path: data.currentPath, panel });
+            return {
+              ...prev,
+              history: nextHistory,
+              historyIndex: prev.historyIndex + 1,
+            };
           });
-          setHistoryIndex((idx) => idx + 1);
         }
       }
     },
@@ -1466,16 +1697,164 @@ export const App: React.FC = () => {
       clearSearch,
       error,
       fetchDirectory,
-      historyIndex,
       locations,
       resolvePanelTarget,
+      updateTab,
       updateTrackedPanelState,
     ]
   );
 
+  const openFolderInNewTab = useCallback(
+    async (targetPath: string, panelOverride?: PanelId) => {
+      if (!targetPath) return;
+      const locs = locationsRef.current;
+      const matchedPanel =
+        panelOverride ?? panelForAnyPath(targetPath, locs, customFavoritesRef.current);
+      const saved = isTrackedPanel(matchedPanel)
+        ? panelStatesRef.current[matchedPanel]
+        : ephemeralPanelStatesRef.current[matchedPanel];
+      const nextViewMode = saved?.viewMode ?? viewModeRef.current;
+      const nextSort = saved?.sort ?? sortConfigRef.current;
+
+      const newId = `tab-${nextTabIdRef.current++}`;
+      const newTab = createTabState(newId, {
+        activePanel: matchedPanel,
+        pendingPath: targetPath,
+        viewMode: nextViewMode,
+        sortConfig: nextSort,
+        loading: false,
+      });
+
+      activeTabIdRef.current = newId;
+      setTabs((prev) => [...prev, newTab]);
+      setActiveTabId(newId);
+
+      const data = await fetchDirectory(targetPath, { tabId: newId });
+      if (data) {
+        updateTab(newId, {
+          history: [{ path: data.currentPath, panel: matchedPanel }],
+          historyIndex: 0,
+        });
+      }
+    },
+    [fetchDirectory, updateTab]
+  );
+
+  const openPanelInNewTab = useCallback(
+    async (panel: PanelId) => {
+      const locs = locationsRef.current;
+      const rootPath = getRootPathForPanel(panel, locs);
+      if (rootPath === null) return;
+
+      if (panel.startsWith("fav:") && isTauriRuntime()) {
+        try {
+          const exists = await invoke<boolean>("check_directory_exists", {
+            path: rootPath,
+          });
+          if (!exists) {
+            const targetKey = normalizePathKey(rootPath);
+            const matched = customFavoritesRef.current.find(
+              (f) => normalizePathKey(f.path) === targetKey
+            );
+            setMissingFavorite(
+              matched ?? {
+                name: labelForPendingPath(rootPath, locs),
+                path: rootPath,
+              }
+            );
+            return;
+          }
+        } catch {
+          // Fall through to normal fetch if check fails unexpectedly
+        }
+      }
+
+      const saved = isTrackedPanel(panel)
+        ? panelStatesRef.current[panel]
+        : ephemeralPanelStatesRef.current[panel];
+      const nextViewMode = saved?.viewMode ?? DEFAULT_VIEW_MODE;
+      const nextSort = saved?.sort ?? DEFAULT_SORT;
+
+      const newId = `tab-${nextTabIdRef.current++}`;
+      const newTab = createTabState(newId, {
+        activePanel: panel,
+        pendingPath: rootPath || null,
+        viewMode: nextViewMode,
+        sortConfig: nextSort,
+        loading: false,
+      });
+
+      activeTabIdRef.current = newId;
+      setTabs((prev) => [...prev, newTab]);
+      setActiveTabId(newId);
+
+      const data = await fetchDirectory(rootPath || undefined, { tabId: newId });
+      if (data) {
+        updateTab(newId, {
+          history: [{ path: data.currentPath, panel }],
+          historyIndex: 0,
+        });
+      }
+    },
+    [fetchDirectory, updateTab]
+  );
+
+  const handleNewTab = useCallback(() => {
+    const current = tabsRef.current.find((t) => t.id === activeTabIdRef.current);
+    const currentTabPath = current?.pendingPath ?? current?.listing?.currentPath ?? "";
+    if (currentTabPath) {
+      void openFolderInNewTab(currentTabPath, current?.activePanel);
+    } else {
+      void openPanelInNewTab("home");
+    }
+  }, [openFolderInNewTab, openPanelInNewTab]);
+
+  const handleCloseTab = useCallback((tabId: string) => {
+    const currentTabs = tabsRef.current;
+    if (currentTabs.length <= 1) return;
+    const idx = currentTabs.findIndex((t) => t.id === tabId);
+    if (idx === -1) return;
+
+    const loadTimer = loadingTimerByTabRef.current.get(tabId);
+    if (loadTimer !== undefined) {
+      window.clearTimeout(loadTimer);
+      loadingTimerByTabRef.current.delete(tabId);
+    }
+    const searchTimer = searchDebounceByTabRef.current.get(tabId);
+    if (searchTimer !== undefined) {
+      window.clearTimeout(searchTimer);
+      searchDebounceByTabRef.current.delete(tabId);
+    }
+    requestIdByTabRef.current.delete(tabId);
+    searchRequestIdByTabRef.current.delete(tabId);
+
+    const nextTabs = currentTabs.filter((t) => t.id !== tabId);
+    setTabs(nextTabs);
+    if (activeTabIdRef.current === tabId) {
+      const nextActive = nextTabs[Math.min(idx, nextTabs.length - 1)] ?? nextTabs[0];
+      activeTabIdRef.current = nextActive.id;
+      setActiveTabId(nextActive.id);
+    }
+  }, []);
+
+  const handleSelectTab = useCallback((tabId: string) => {
+    activeTabIdRef.current = tabId;
+    setActiveTabId(tabId);
+  }, []);
+
+  const handleCycleTab = useCallback((delta: 1 | -1) => {
+    const currentTabs = tabsRef.current;
+    if (currentTabs.length <= 1) return;
+    const idx = currentTabs.findIndex((t) => t.id === activeTabIdRef.current);
+    const nextIdx = (idx + delta + currentTabs.length) % currentTabs.length;
+    const nextId = currentTabs[nextIdx].id;
+    activeTabIdRef.current = nextId;
+    setActiveTabId(nextId);
+  }, []);
+
   const handleExpandedPathsChange = useCallback(
     (paths: string[]) => {
-      setExpandedPaths(paths);
+      updateActiveTab({ expandedPaths: paths });
       const panel = activePanelRef.current;
       if (isTrackedPanel(panel)) {
         const rootPath = getRootPathForPanel(panel, locationsRef.current);
@@ -1484,12 +1863,12 @@ export const App: React.FC = () => {
         }
       }
     },
-    [activePath, updateTrackedPanelState]
+    [activePath, updateActiveTab, updateTrackedPanelState]
   );
 
   const handleColumnPathsChange = useCallback(
     (paths: string[]) => {
-      setColumnPaths(paths);
+      updateActiveTab({ columnPaths: paths });
       const panel = activePanelRef.current;
       if (isTrackedPanel(panel)) {
         const rootPath = getRootPathForPanel(panel, locationsRef.current);
@@ -1498,14 +1877,15 @@ export const App: React.FC = () => {
         }
       }
     },
-    [activePath, updateTrackedPanelState]
+    [activePath, updateActiveTab, updateTrackedPanelState]
   );
 
   const handleChangeViewMode = useCallback(
     (nextMode: ViewMode) => {
+      const tabId = activeTabIdRef.current;
       const prevMode = viewModeRef.current;
       viewModeRef.current = nextMode;
-      setViewMode(nextMode);
+      updateTab(tabId, { viewMode: nextMode });
       const panel = activePanelRef.current;
       const currentListing = listingRef.current;
 
@@ -1530,12 +1910,14 @@ export const App: React.FC = () => {
           const nextColumns = nextMode === "columns" ? chain.descendantPaths : [];
           expandedPathsRef.current = nextExpanded;
           columnPathsRef.current = nextColumns;
-          setExpandedPaths(nextExpanded);
-          setColumnPaths(nextColumns);
-          setRevealRequest({
-            anchorRoot: chain.anchorRoot,
-            path: chain.targetPath,
-            seq: ++revealSeqRef.current,
+          updateTab(tabId, {
+            expandedPaths: nextExpanded,
+            columnPaths: nextColumns,
+            revealRequest: {
+              anchorRoot: chain.anchorRoot,
+              path: chain.targetPath,
+              seq: ++revealSeqRef.current,
+            },
           });
 
           if (isTrackedPanel(panel)) {
@@ -1549,7 +1931,7 @@ export const App: React.FC = () => {
             persistEphemeral();
           }
 
-          void fetchDirectory(chain.anchorRoot);
+          void fetchDirectory(chain.anchorRoot, { tabId });
           return;
         }
 
@@ -1557,11 +1939,13 @@ export const App: React.FC = () => {
         if (nextMode === "list" && prevMode === "columns" && columnPathsRef.current.length > 0) {
           const synced = [...columnPathsRef.current];
           expandedPathsRef.current = synced;
-          setExpandedPaths(synced);
-          setRevealRequest({
-            anchorRoot: currentListing.currentPath,
-            path: synced[synced.length - 1],
-            seq: ++revealSeqRef.current,
+          updateTab(tabId, {
+            expandedPaths: synced,
+            revealRequest: {
+              anchorRoot: currentListing.currentPath,
+              path: synced[synced.length - 1],
+              seq: ++revealSeqRef.current,
+            },
           });
           if (isTrackedPanel(panel)) {
             updateTrackedPanelState(panel, {
@@ -1587,11 +1971,13 @@ export const App: React.FC = () => {
             : null;
           if (subChain && subChain.length > 0) {
             columnPathsRef.current = subChain;
-            setColumnPaths(subChain);
-            setRevealRequest({
-              anchorRoot: currentListing.currentPath,
-              path: subChain[subChain.length - 1],
-              seq: ++revealSeqRef.current,
+            updateTab(tabId, {
+              columnPaths: subChain,
+              revealRequest: {
+                anchorRoot: currentListing.currentPath,
+                path: subChain[subChain.length - 1],
+                seq: ++revealSeqRef.current,
+              },
             });
             if (isTrackedPanel(panel)) {
               updateTrackedPanelState(panel, {
@@ -1612,13 +1998,13 @@ export const App: React.FC = () => {
         persistEphemeral();
       }
     },
-    [fetchDirectory, updateTrackedPanelState]
+    [fetchDirectory, updateTab, updateTrackedPanelState]
   );
 
   const handleChangeSort = useCallback(
     (nextSort: SortConfig) => {
       sortConfigRef.current = nextSort;
-      setSortConfig(nextSort);
+      updateActiveTab({ sortConfig: nextSort });
       const panel = activePanelRef.current;
       if (isTrackedPanel(panel)) {
         updateTrackedPanelState(panel, { sort: nextSort });
@@ -1630,7 +2016,7 @@ export const App: React.FC = () => {
         };
       }
     },
-    [updateTrackedPanelState]
+    [updateActiveTab, updateTrackedPanelState]
   );
 
   const handleOpenItem = useCallback(async (entry: FileEntry) => {
@@ -1649,12 +2035,17 @@ export const App: React.FC = () => {
     async (entry: FileEntry) => {
       if (!isTauriRuntime()) return;
       try {
-        const invoked = await invoke<boolean>("show_context_menu", {
+        const res = await invoke<ContextMenuResult>("show_context_menu", {
           path: entry.path,
           entryKind: entry.entryKind,
+          isDir: entry.isDir,
         });
+        if (res.openInNewTab) {
+          void openFolderInNewTab(entry.path);
+          return;
+        }
         if (
-          invoked &&
+          res.invoked &&
           listing &&
           (listing.currentPath === "virtual://trash" || !listing.currentPath.startsWith("virtual://"))
         ) {
@@ -1665,7 +2056,7 @@ export const App: React.FC = () => {
         // Ignore if shell context menu cannot be shown for a virtual entry
       }
     },
-    [fetchDirectory, listing]
+    [fetchDirectory, listing, openFolderInNewTab]
   );
 
   const handleShareWithOs = useCallback(async (entry: FileEntry) => {
@@ -1809,13 +2200,12 @@ export const App: React.FC = () => {
 
   const navigateHistoryTo = useCallback(
     async (nextIndex: number) => {
-      clearSearch();
+      const tabId = activeTabIdRef.current;
+      clearSearch(tabId);
       const entry = history[nextIndex];
       if (!entry) return;
       const targetPanel = entry.panel;
       activePanelRef.current = targetPanel;
-      setActivePanel(targetPanel);
-      setRevealRequest(null);
 
       if (isTrackedPanel(targetPanel)) {
         const saved = panelStatesRef.current[targetPanel];
@@ -1823,29 +2213,37 @@ export const App: React.FC = () => {
         const nextSort = saved?.sort ?? DEFAULT_SORT;
         viewModeRef.current = nextViewMode;
         sortConfigRef.current = nextSort;
-        setViewMode(nextViewMode);
-        setSortConfig(nextSort);
         const sameAsSaved = Boolean(
           saved?.lastPath &&
             entry.path.toLowerCase() === saved.lastPath.toLowerCase()
         );
-        setExpandedPaths(sameAsSaved ? (saved?.expandedPaths ?? []) : []);
-        setColumnPaths(sameAsSaved ? (saved?.columnPaths ?? []) : []);
+        updateTab(tabId, {
+          activePanel: targetPanel,
+          revealRequest: null,
+          viewMode: nextViewMode,
+          sortConfig: nextSort,
+          expandedPaths: sameAsSaved ? (saved?.expandedPaths ?? []) : [],
+          columnPaths: sameAsSaved ? (saved?.columnPaths ?? []) : [],
+        });
       } else {
         const ephemeral = ephemeralPanelStatesRef.current[targetPanel];
         const nextViewMode = ephemeral?.viewMode ?? DEFAULT_VIEW_MODE;
         const nextSort = ephemeral?.sort ?? DEFAULT_SORT;
         viewModeRef.current = nextViewMode;
         sortConfigRef.current = nextSort;
-        setViewMode(nextViewMode);
-        setSortConfig(nextSort);
-        setExpandedPaths([]);
-        setColumnPaths([]);
+        updateTab(tabId, {
+          activePanel: targetPanel,
+          revealRequest: null,
+          viewMode: nextViewMode,
+          sortConfig: nextSort,
+          expandedPaths: [],
+          columnPaths: [],
+        });
       }
 
-      const data = await fetchDirectory(entry.path);
+      const data = await fetchDirectory(entry.path, { tabId });
       if (data) {
-        setHistoryIndex(nextIndex);
+        updateTab(tabId, { historyIndex: nextIndex });
         if (isTrackedPanel(targetPanel)) {
           const rootPath = getRootPathForPanel(targetPanel, locationsRef.current);
           const withinRoot =
@@ -1856,7 +2254,7 @@ export const App: React.FC = () => {
         }
       }
     },
-    [clearSearch, fetchDirectory, history, updateTrackedPanelState]
+    [clearSearch, fetchDirectory, history, updateTab, updateTrackedPanelState]
   );
 
   const handleBack = useCallback(async () => {
@@ -1973,6 +2371,30 @@ export const App: React.FC = () => {
         return;
       }
 
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "t") {
+        e.preventDefault();
+        handleNewTab();
+        return;
+      }
+
+      if (
+        (e.ctrlKey || e.metaKey) &&
+        !e.altKey &&
+        !e.shiftKey &&
+        e.key.toLowerCase() === "w" &&
+        tabsRef.current.length > 1
+      ) {
+        e.preventDefault();
+        handleCloseTab(activeTabIdRef.current);
+        return;
+      }
+
+      if (e.ctrlKey && !e.altKey && e.key === "Tab" && tabsRef.current.length > 1) {
+        e.preventDefault();
+        handleCycleTab(e.shiftKey ? -1 : 1);
+        return;
+      }
+
       const target = e.target as HTMLElement | null;
       const isEditable =
         target instanceof HTMLInputElement ||
@@ -1992,7 +2414,18 @@ export const App: React.FC = () => {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [goToPathOpen, handleBack, handleForward, handleOpenSearch, handleRemoveFavorite, missingFavorite, settingsOpen]);
+  }, [
+    goToPathOpen,
+    handleBack,
+    handleCloseTab,
+    handleCycleTab,
+    handleForward,
+    handleNewTab,
+    handleOpenSearch,
+    handleRemoveFavorite,
+    missingFavorite,
+    settingsOpen,
+  ]);
 
   const isPendingNavigation = loading && pendingPath !== null;
   const displayTitle = isSearchMode
@@ -2010,6 +2443,25 @@ export const App: React.FC = () => {
       ? listing.currentName
       : (locations?.homeName ?? "Home");
 
+  const showTabBar = tabs.length > 1 || tabBarPinned;
+  const tabBarItems: TabBarItem[] = tabs.map((tab) => {
+    const tabTrimmedSearch = tab.searchQuery.trim();
+    const tabIsSearch = tab.searchOpen && tabTrimmedSearch.length > 0;
+    const tabPath = tab.pendingPath ?? tab.listing?.currentPath ?? "";
+    const tabIsPending = tab.loading && tab.pendingPath !== null;
+    const tabTitle = tabIsSearch
+      ? `Search: "${tabTrimmedSearch}"`
+      : tabIsPending
+        ? labelForPendingPath(tab.pendingPath ?? undefined, locations)
+        : tab.listing?.currentName ?? labelForPendingPath(tab.pendingPath ?? undefined, locations);
+    return {
+      id: tab.id,
+      title: tabTitle,
+      path: tabPath,
+      isSearch: tabIsSearch,
+    };
+  });
+
   return (
     <div className="finder-window" onContextMenu={(e) => e.preventDefault()}>
       <Sidebar
@@ -2022,6 +2474,7 @@ export const App: React.FC = () => {
         width={sidebarWidth}
         onResizeWidth={setSidebarWidth}
         onSelectPanel={(panel) => void handleSelectPanel(panel)}
+        onOpenPanelInNewTab={(panel) => void openPanelInNewTab(panel)}
         onRemoveFavorite={handleRemoveFavorite}
         useWindowsWindowControls={settings.useWindowsWindowControls}
         onWindowClose={handleWindowClose}
@@ -2048,6 +2501,11 @@ export const App: React.FC = () => {
           onShareWithOs={(entry) => void handleShareWithOs(entry)}
           onCopyFile={(entry) => void handleCopyFile(entry)}
           onCopyPath={(entry) => void handleCopyPath(entry)}
+          onNewTab={handleNewTab}
+          onOpenInNewTab={(p) => void openFolderInNewTab(p)}
+          tabBarVisible={showTabBar}
+          canToggleTabBar={tabs.length === 1}
+          onToggleTabBar={() => setTabBarPinned((prev) => !prev)}
           onNewFolder={() => void handleNewFolder()}
           onGoToPath={() => setGoToPathOpen(true)}
           onToggleShowHidden={handleToggleShowHidden}
@@ -2065,10 +2523,22 @@ export const App: React.FC = () => {
           onOpenSearch={handleOpenSearch}
           onSearchQueryChange={handleSearchQueryChange}
           onSearchSubmit={handleSearchSubmit}
-          onCloseSearch={clearSearch}
+          onCloseSearch={() => clearSearch()}
         />
 
+        {showTabBar && (
+          <TabBar
+            tabs={tabBarItems}
+            activeTabId={activeTab.id}
+            homePath={listing?.homePath ?? locations?.homePath ?? ""}
+            onSelectTab={handleSelectTab}
+            onCloseTab={handleCloseTab}
+            onNewTab={handleNewTab}
+          />
+        )}
+
         <MainView
+          tabId={activeTab.id}
           currentPath={isSearchMode ? (searchListing?.currentPath ?? `virtual://search?q=${trimmedSearch}`) : activePath}
           entries={
             isSearchMode
@@ -2102,6 +2572,7 @@ export const App: React.FC = () => {
           }
           onSelect={setSelectedEntry}
           onOpenFolder={(p) => void navigateTo(p)}
+          onOpenFolderInNewTab={(p) => void openFolderInNewTab(p)}
           onOpenItem={(entry) => void handleOpenItem(entry)}
           onContextMenu={(entry) => void handleContextMenu(entry)}
           onChangeSort={handleChangeSort}
@@ -2121,7 +2592,7 @@ export const App: React.FC = () => {
           }}
           searchQuery={isSearchMode ? trimmedSearch : null}
           searchScopeName={isSearchMode ? searchScopeName : null}
-          onClearSearch={clearSearch}
+          onClearSearch={() => clearSearch()}
         />
       </div>
 
