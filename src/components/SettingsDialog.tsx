@@ -1,6 +1,6 @@
 import React from "react";
-import { X } from "lucide-react";
-import type { AppSettings } from "../types";
+import { Moon, Sun, X } from "lucide-react";
+import type { AppSettings, ThemeMode } from "../types";
 
 interface SettingsDialogProps {
   settings: AppSettings;
@@ -17,6 +17,14 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
     onChange({
       ...settings,
       useWindowsWindowControls: !settings.useWindowsWindowControls,
+    });
+  };
+
+  const setTheme = (theme: ThemeMode) => {
+    if (settings.theme === theme) return;
+    onChange({
+      ...settings,
+      theme,
     });
   };
 
@@ -52,7 +60,48 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
         </div>
 
         <div className="settings-dialog-body">
-          <div className="settings-section-label">Window</div>
+          <div className="settings-section-label">Appearance</div>
+          <div className="settings-group">
+            <div className="settings-row">
+              <div className="settings-row-text">
+                <span id="setting-theme-label" className="settings-row-title">
+                  Theme
+                </span>
+                <span id="setting-theme-desc" className="settings-row-desc">
+                  Choose Light or Dark appearance for WinFinder.
+                </span>
+              </div>
+              <div
+                className="settings-segmented"
+                role="radiogroup"
+                aria-labelledby="setting-theme-label"
+                aria-describedby="setting-theme-desc"
+              >
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={settings.theme === "light"}
+                  className={`settings-segment-btn ${settings.theme === "light" ? "active" : ""}`}
+                  onClick={() => setTheme("light")}
+                >
+                  <Sun size={13} strokeWidth={1.85} />
+                  <span>Light</span>
+                </button>
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={settings.theme === "dark"}
+                  className={`settings-segment-btn ${settings.theme === "dark" ? "active" : ""}`}
+                  onClick={() => setTheme("dark")}
+                >
+                  <Moon size={13} strokeWidth={1.85} />
+                  <span>Dark</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div className="settings-section-label settings-section-spaced">Window</div>
           <div className="settings-group">
             <div className="settings-row">
               <div className="settings-row-text">
