@@ -2294,3 +2294,159 @@ body.is-dragging-folder-blocked * {
   flex: 0 0 auto;
   min-width: 72px;
 }
+
+/* ==================== FINDER TAB BAR ==================== */
+.finder-tabbar {
+  height: 29px;
+  min-height: 29px;
+  display: flex;
+  align-items: stretch;
+  background: #e9e9ed;
+  border-bottom: 1px solid var(--border-hairline);
+  user-select: none;
+  overflow: hidden;
+}
+
+.finder-tabbar-tabs {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: stretch;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+
+.finder-tabbar-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.finder-tab {
+  position: relative;
+  flex: 1 1 0;
+  min-width: 112px;
+  max-width: 280px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 24px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 400;
+  cursor: default;
+  outline: none;
+  transition: background-color 0.1s ease, color 0.1s ease;
+}
+
+.finder-tab:hover:not(.active) {
+  background: rgba(0, 0, 0, 0.04);
+  color: var(--text-primary);
+}
+
+.finder-tab.active {
+  background: var(--bg-canvas);
+  color: var(--text-primary);
+  font-weight: 500;
+  box-shadow: inset 1px 0 0 rgba(0, 0, 0, 0.07), inset -1px 0 0 rgba(0, 0, 0, 0.07);
+}
+
+.finder-tab.active:first-child {
+  box-shadow: inset -1px 0 0 rgba(0, 0, 0, 0.07);
+}
+
+.finder-tab.has-divider::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  top: 6px;
+  bottom: 6px;
+  width: 1px;
+  background: rgba(0, 0, 0, 0.11);
+  pointer-events: none;
+}
+
+.finder-tab-content {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.tab-item-icon {
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+.finder-tab.active .tab-item-icon {
+  color: var(--accent-blue);
+}
+
+.finder-tab-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  letter-spacing: -0.008em;
+}
+
+.finder-tab-close {
+  position: absolute;
+  left: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: default;
+  opacity: 0;
+  transition: opacity 0.1s ease, background-color 0.1s ease, color 0.1s ease;
+}
+
+.finder-tab:hover .finder-tab-close,
+.finder-tab.active .finder-tab-close,
+.finder-tab-close:focus-visible {
+  opacity: 1;
+}
+
+.finder-tab-close:hover {
+  background: rgba(0, 0, 0, 0.1);
+  color: var(--text-primary);
+}
+
+.finder-tab-close:active {
+  background: rgba(0, 0, 0, 0.16);
+}
+
+.finder-tab-new-btn {
+  width: 30px;
+  min-width: 30px;
+  height: 100%;
+  padding: 0;
+  border: none;
+  border-left: 1px solid var(--border-hairline);
+  background: transparent;
+  color: var(--text-secondary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: default;
+  flex-shrink: 0;
+  transition: background-color 0.1s ease, color 0.1s ease;
+}
+
+.finder-tab-new-btn:hover {
+  background: rgba(0, 0, 0, 0.055);
+  color: var(--text-primary);
+}
+
+.finder-tab-new-btn:active {
+  background: rgba(0, 0, 0, 0.1);
+}

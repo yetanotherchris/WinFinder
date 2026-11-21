@@ -10,6 +10,7 @@ import {
   HardDrive,
   Globe,
   Trash2,
+  Plus,
 } from "lucide-react";
 import type { FavoriteFolder, PanelId, SidebarLocations } from "../types";
 import {
@@ -28,6 +29,7 @@ interface SidebarProps {
   width: number;
   onResizeWidth: (width: number) => void;
   onSelectPanel: (panel: PanelId) => void;
+  onOpenPanelInNewTab: (panel: PanelId) => void;
   onRemoveFavorite: (path: string) => void;
   useWindowsWindowControls: boolean;
   onWindowClose: () => void;
@@ -45,6 +47,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   width,
   onResizeWidth,
   onSelectPanel,
+  onOpenPanelInNewTab,
   onRemoveFavorite,
   useWindowsWindowControls,
   onWindowClose,
@@ -55,8 +58,35 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const [contextMenu, setContextMenu] = useState<{
     x: number;
     y: number;
-    fav: FavoriteFolder;
+    panel: PanelId;
+    fav?: FavoriteFolder;
   } | null>(null);
+
+  const handlePanelClick = (panel: PanelId, e: React.MouseEvent) => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      onOpenPanelInNewTab(panel);
+      return;
+    }
+    onSelectPanel(panel);
+  };
+
+  const handlePanelAuxClick = (panel: PanelId, e: React.MouseEvent) => {
+    if (e.button === 1) {
+      e.preventDefault();
+      onOpenPanelInNewTab(panel);
+    }
+  };
+
+  const handlePanelContextMenu = (
+    panel: PanelId,
+    e: React.MouseEvent,
+    fav?: FavoriteFolder
+  ) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setContextMenu({ x: e.clientX, y: e.clientY, panel, fav });
+  };
 
   const builtInCount = countBuiltInFavorites(locations);
   const totalFavoritesCount = builtInCount + customFavorites.length;
@@ -186,7 +216,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <button
                 type="button"
                 className={`sidebar-item interactive ${activePanel === "recents" ? "active" : ""}`}
-                onClick={() => onSelectPanel("recents")}
+                onClick={(e) => handlePanelClick("recents", e)}
+                onAuxClick={(e) => handlePanelAuxClick("recents", e)}
+                onContextMenu={(e) => handlePanelContextMenu("recents", e)}
                 title="Recents"
               >
                 <Clock className="sidebar-icon accent-blue" size={16} strokeWidth={1.8} />
@@ -197,7 +229,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <button
                 type="button"
                 className={`sidebar-item interactive ${activePanel === "applications" ? "active" : ""}`}
-                onClick={() => onSelectPanel("applications")}
+                onClick={(e) => handlePanelClick("applications", e)}
+                onAuxClick={(e) => handlePanelAuxClick("applications", e)}
+                onContextMenu={(e) => handlePanelContextMenu("applications", e)}
                 title="Applications"
               >
                 <LayoutGrid className="sidebar-icon accent-blue" size={16} strokeWidth={1.8} />
@@ -209,7 +243,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 <button
                   type="button"
                   className={`sidebar-item interactive ${activePanel === "desktop" ? "active" : ""}`}
-                  onClick={() => onSelectPanel("desktop")}
+                  onClick={(e) => handlePanelClick("desktop", e)}
+                  onAuxClick={(e) => handlePanelAuxClick("desktop", e)}
+                  onContextMenu={(e) => handlePanelContextMenu("desktop", e)}
                   title="Desktop"
                 >
                   <Monitor className="sidebar-icon accent-blue" size={16} strokeWidth={1.8} />
@@ -222,7 +258,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 <button
                   type="button"
                   className={`sidebar-item interactive ${activePanel === "documents" ? "active" : ""}`}
-                  onClick={() => onSelectPanel("documents")}
+                  onClick={(e) => handlePanelClick("documents", e)}
+                  onAuxClick={(e) => handlePanelAuxClick("documents", e)}
+                  onContextMenu={(e) => handlePanelContextMenu("documents", e)}
                   title="Documents"
                 >
                   <FileText className="sidebar-icon accent-blue" size={16} strokeWidth={1.8} />
@@ -235,7 +273,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 <button
                   type="button"
                   className={`sidebar-item interactive ${activePanel === "downloads" ? "active" : ""}`}
-                  onClick={() => onSelectPanel("downloads")}
+                  onClick={(e) => handlePanelClick("downloads", e)}
+                  onAuxClick={(e) => handlePanelAuxClick("downloads", e)}
+                  onContextMenu={(e) => handlePanelContextMenu("downloads", e)}
                   title="Downloads"
                 >
                   <ArrowDownCircle className="sidebar-icon accent-blue" size={16} strokeWidth={1.8} />
@@ -247,7 +287,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <button
                 type="button"
                 className={`sidebar-item interactive ${activePanel === "home" ? "active" : ""}`}
-                onClick={() => onSelectPanel("home")}
+                onClick={(e) => handlePanelClick("home", e)}
+                onAuxClick={(e) => handlePanelAuxClick("home", e)}
+                onContextMenu={(e) => handlePanelContextMenu("home", e)}
                 title={`Home (${homeName})`}
               >
                 <Home className="sidebar-icon accent-blue" size={16} strokeWidth={1.8} />
@@ -261,12 +303,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   <button
                     type="button"
                     className={`sidebar-item interactive ${activePanel === panelId ? "active" : ""}`}
-                    onClick={() => onSelectPanel(panelId)}
-                    onContextMenu={(e) => {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      setContextMenu({ x: e.clientX, y: e.clientY, fav });
-                    }}
+                    onClick={(e) => handlePanelClick(panelId, e)}
+                    onAuxClick={(e) => handlePanelAuxClick(panelId, e)}
+                    onContextMenu={(e) => handlePanelContextMenu(panelId, e, fav)}
                     title={fav.path}
                   >
                     <Folder className="sidebar-icon accent-blue" size={16} strokeWidth={1.8} />
@@ -305,7 +344,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <button
                 type="button"
                 className={`sidebar-item interactive ${activePanel === "drives" ? "active" : ""}`}
-                onClick={() => onSelectPanel("drives")}
+                onClick={(e) => handlePanelClick("drives", e)}
+                onAuxClick={(e) => handlePanelAuxClick("drives", e)}
+                onContextMenu={(e) => handlePanelContextMenu("drives", e)}
                 title="Drives"
               >
                 <HardDrive className="sidebar-icon muted-gray" size={16} strokeWidth={1.8} />
@@ -316,7 +357,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <button
                 type="button"
                 className={`sidebar-item interactive ${activePanel === "network" ? "active" : ""}`}
-                onClick={() => onSelectPanel("network")}
+                onClick={(e) => handlePanelClick("network", e)}
+                onAuxClick={(e) => handlePanelAuxClick("network", e)}
+                onContextMenu={(e) => handlePanelContextMenu("network", e)}
                 title="Network"
               >
                 <Globe className="sidebar-icon muted-gray" size={16} strokeWidth={1.8} />
@@ -327,7 +370,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <button
                 type="button"
                 className={`sidebar-item interactive ${activePanel === "trash" ? "active" : ""}`}
-                onClick={() => onSelectPanel("trash")}
+                onClick={(e) => handlePanelClick("trash", e)}
+                onAuxClick={(e) => handlePanelAuxClick("trash", e)}
+                onContextMenu={(e) => handlePanelContextMenu("trash", e)}
                 title="Trash"
               >
                 <Trash2 className="sidebar-icon muted-gray" size={16} strokeWidth={1.8} />
@@ -338,7 +383,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         </div>
       </nav>
 
-      {/* Right-click context menu for custom favorites */}
+      {/* Right-click context menu for sidebar items */}
       {contextMenu && (
         <div
           className="sidebar-context-menu"
@@ -351,13 +396,30 @@ export const Sidebar: React.FC<SidebarProps> = ({
             className="sort-menu-item"
             role="menuitem"
             onClick={() => {
-              onRemoveFavorite(contextMenu.fav.path);
+              onOpenPanelInNewTab(contextMenu.panel);
               setContextMenu(null);
             }}
           >
-            <Trash2 size={13} strokeWidth={1.9} />
-            <span>Remove from Favorites</span>
+            <Plus size={13} strokeWidth={2} />
+            <span>Open in New Tab</span>
           </button>
+          {contextMenu.fav && (
+            <>
+              <div className="sort-menu-sep" />
+              <button
+                type="button"
+                className="sort-menu-item"
+                role="menuitem"
+                onClick={() => {
+                  onRemoveFavorite(contextMenu.fav!.path);
+                  setContextMenu(null);
+                }}
+              >
+                <Trash2 size={13} strokeWidth={1.9} />
+                <span>Remove from Favorites</span>
+              </button>
+            </>
+          )}
         </div>
       )}
 

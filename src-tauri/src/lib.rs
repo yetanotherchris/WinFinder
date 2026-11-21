@@ -957,7 +957,7 @@ fn list_recents(show_hidden: bool) -> Result<DirectoryListing, String> {
 
 #[cfg(target_os = "windows")]
 mod win_shell {
-    use super::{extract_windows_drive_root, FileEntry, UnlockDriveResult};
+    use super::{extract_windows_drive_root, ContextMenuResult, FileEntry, UnlockDriveResult};
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
     use std::collections::HashSet;
     use std::mem::size_of;
@@ -1002,8 +1002,9 @@ mod win_shell {
         SIGDN_PARENTRELATIVEPARSING, SIIGBF_BIGGERSIZEOK, SIIGBF_ICONONLY,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        CreatePopupMenu, DestroyMenu, GetCursorPos, PostMessageW, SetForegroundWindow,
-        TrackPopupMenuEx, SW_SHOWNORMAL, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_NULL,
+        CreatePopupMenu, DestroyMenu, GetCursorPos, InsertMenuW, PostMessageW, SetForegroundWindow,
+        TrackPopupMenuEx, MF_BYPOSITION, MF_SEPARATOR, MF_STRING, SW_SHOWNORMAL, TPM_RETURNCMD,
+        TPM_RIGHTBUTTON, WM_NULL,
     };
 
     const DRIVE_REMOTE: u32 = 4;
@@ -1510,12 +1511,14 @@ mod win_shell {
         hwnd_raw: isize,
         path: &str,
         entry_kind: &str,
-    ) -> Result<bool, String> {
+        is_dir: bool,
+    ) -> Result<ContextMenuResult, String> {
+        const CUSTOM_OPEN_IN_NEW_TAB_ID: usize = 0x7FFF;
         unsafe {
             let co_hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
             let should_uninit = co_hr.is_ok();
 
-            let result = (|| -> Result<bool, String> {
+            let result = (|| -> Result<ContextMenuResult, String> {
                 let shell_item: IShellItem = if entry_kind == "app" {
                     let aumid = path.strip_prefix("app://").unwrap_or(path);
                     let apps_folder: IShellItem =
@@ -1539,12 +1542,30 @@ mod win_shell {
                     hmenu,
                     0,
                     1,
-                    0x7FFF,
+                    0x7FFE,
                     CMF_NORMAL | CMF_EXPLORE,
                 );
                 if query_res.is_err() {
                     let _ = DestroyMenu(hmenu);
                     return Err("Failed to populate context menu".to_string());
+                }
+
+                if is_dir && !path.starts_with("virtual://") {
+                    let open_tab_label = HSTRING::from("Open in New Tab");
+                    let _ = InsertMenuW(
+                        hmenu,
+                        0,
+                        MF_BYPOSITION | MF_STRING,
+                        CUSTOM_OPEN_IN_NEW_TAB_ID,
+                        PCWSTR(open_tab_label.as_ptr()),
+                    );
+                    let _ = InsertMenuW(
+                        hmenu,
+                        1,
+                        MF_BYPOSITION | MF_SEPARATOR,
+                        0,
+                        PCWSTR::null(),
+                    );
                 }
 
                 let hwnd = HWND(hwnd_raw as *mut _);
@@ -1562,7 +1583,10 @@ mod win_shell {
                 );
 
                 let mut invoked = false;
-                if cmd.0 > 0 {
+                let mut open_in_new_tab = false;
+                if cmd.0 as usize == CUSTOM_OPEN_IN_NEW_TAB_ID {
+                    open_in_new_tab = true;
+                } else if cmd.0 > 0 {
                     let verb_id = (cmd.0 as usize) - 1;
                     let ici = CMINVOKECOMMANDINFOEX {
                         cbSize: size_of::<CMINVOKECOMMANDINFOEX>() as u32,
@@ -1581,7 +1605,10 @@ mod win_shell {
 
                 let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
                 let _ = DestroyMenu(hmenu);
-                Ok(invoked)
+                Ok(ContextMenuResult {
+                    invoked,
+                    open_in_new_tab,
+                })
             })();
 
             if should_uninit {
@@ -2473,12 +2500,21 @@ fn open_item(path: String, entry_kind: String) -> Result<(), String> {
     }
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ContextMenuResult {
+    invoked: bool,
+    open_in_new_tab: bool,
+}
+
 #[tauri::command]
 async fn show_context_menu(
     window: tauri::Window,
     path: String,
     entry_kind: String,
-) -> Result<bool, String> {
+    is_dir: Option<bool>,
+) -> Result<ContextMenuResult, String> {
+    let dir_flag = is_dir.unwrap_or_else(|| entry_kind == "folder" || entry_kind == "drive");
     #[cfg(target_os = "windows")]
     {
         let hwnd_raw = window
@@ -2488,7 +2524,8 @@ async fn show_context_menu(
         let (tx, rx) = std::sync::mpsc::channel();
         window
             .run_on_main_thread(move || {
-                let res = win_shell::show_shell_context_menu(hwnd_raw, &path, &entry_kind);
+                let res =
+                    win_shell::show_shell_context_menu(hwnd_raw, &path, &entry_kind, dir_flag);
                 let _ = tx.send(res);
             })
             .map_err(|e| format!("Failed to dispatch context menu: {}", e))?;
@@ -2503,8 +2540,11 @@ async fn show_context_menu(
 
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = (window, path, entry_kind);
-        Ok(false)
+        let _ = (window, path, entry_kind, dir_flag);
+        Ok(ContextMenuResult {
+            invoked: false,
+            open_in_new_tab: false,
+        })
     }
 }
 

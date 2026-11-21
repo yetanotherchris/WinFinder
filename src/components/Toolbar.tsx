@@ -22,6 +22,7 @@ import {
   RefreshCw,
   Share2,
   Settings,
+  Plus,
 } from "lucide-react";
 import type { FileEntry, SortConfig, SortField, ViewMode } from "../types";
 
@@ -43,6 +44,11 @@ interface ToolbarProps {
   onShareWithOs: (entry: FileEntry) => void;
   onCopyFile: (entry: FileEntry) => void;
   onCopyPath: (entry: FileEntry) => void;
+  onNewTab: () => void;
+  onOpenInNewTab: (path: string) => void;
+  tabBarVisible: boolean;
+  canToggleTabBar: boolean;
+  onToggleTabBar: () => void;
   onNewFolder: () => void;
   onGoToPath: () => void;
   onToggleShowHidden: () => void;
@@ -88,6 +94,11 @@ export const Toolbar: React.FC<ToolbarProps> = ({
   onShareWithOs,
   onCopyFile,
   onCopyPath,
+  onNewTab,
+  onOpenInNewTab,
+  tabBarVisible,
+  canToggleTabBar,
+  onToggleTabBar,
   onNewFolder,
   onGoToPath,
   onToggleShowHidden,
@@ -447,6 +458,67 @@ export const Toolbar: React.FC<ToolbarProps> = ({
 
           {actionsMenuOpen && (
             <div className="sort-popover share-popover" role="menu" aria-label="Folder actions">
+              <button
+                type="button"
+                role="menuitem"
+                className="sort-menu-item"
+                onClick={() => {
+                  setActionsMenuOpen(false);
+                  onNewTab();
+                }}
+              >
+                <span className="sort-check-slot">
+                  <Plus size={13} strokeWidth={2.2} />
+                </span>
+                <span className="menu-item-label">New Tab</span>
+                <span className="menu-item-shortcut">
+                  {typeof navigator !== "undefined" && /Mac/i.test(navigator.platform)
+                    ? "⌘T"
+                    : "Ctrl+T"}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                role="menuitem"
+                className="sort-menu-item"
+                disabled={!selectedEntry?.isDir && !currentPath}
+                onClick={() => {
+                  setActionsMenuOpen(false);
+                  if (selectedEntry?.isDir) {
+                    onOpenInNewTab(selectedEntry.path);
+                  } else if (currentPath) {
+                    onOpenInNewTab(currentPath);
+                  }
+                }}
+              >
+                <span className="sort-check-slot">
+                  <FolderOpen size={13} strokeWidth={2} />
+                </span>
+                <span className="menu-item-label">
+                  {selectedEntry?.isDir ? "Open in New Tab" : "Duplicate Tab"}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                role="menuitemcheckbox"
+                aria-checked={tabBarVisible}
+                disabled={!canToggleTabBar}
+                className="sort-menu-item"
+                onClick={() => {
+                  setActionsMenuOpen(false);
+                  onToggleTabBar();
+                }}
+              >
+                <span className="sort-check-slot">
+                  {tabBarVisible && <Check size={13} strokeWidth={2.4} />}
+                </span>
+                <span>Show Tab Bar</span>
+              </button>
+
+              <div className="sort-menu-sep" />
+
               <button
                 type="button"
                 role="menuitem"
