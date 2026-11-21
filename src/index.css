@@ -1030,6 +1030,11 @@ body.is-dragging-folder-blocked * {
   font-weight: 600;
 }
 
+.list-col-hdr.col-static:hover {
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
 .list-col-hdr.col-size {
   justify-content: flex-end;
 }
@@ -1134,6 +1139,7 @@ body.is-dragging-folder-blocked * {
   font-style: italic;
 }
 
+.list-cell.col-path,
 .list-cell.col-date,
 .list-cell.col-size,
 .list-cell.col-kind {
@@ -1141,6 +1147,7 @@ body.is-dragging-folder-blocked * {
   color: var(--text-secondary);
 }
 
+.list-row.selected .list-cell.col-path,
 .list-row.selected .list-cell.col-date,
 .list-row.selected .list-cell.col-size,
 .list-row.selected .list-cell.col-kind {
@@ -2114,8 +2121,20 @@ body.is-dragging-folder-blocked * {
   margin-top: 2px;
 }
 
+.settings-row-hint code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10.5px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: rgba(180, 83, 9, 0.1);
+}
+
 :root[data-theme="dark"] .settings-row-hint {
   color: #fbbf24;
+}
+
+:root[data-theme="dark"] .settings-row-hint code {
+  background: rgba(251, 191, 36, 0.14);
 }
 
 .settings-segmented {

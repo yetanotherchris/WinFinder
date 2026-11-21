@@ -40,6 +40,7 @@ import {
   formatDateModified,
   formatFileSize,
   getKindLabel,
+  getParentPath,
   measureTextPx,
   sortEntries,
 } from "../utils/format";
@@ -232,9 +233,12 @@ export const MainView: React.FC<MainViewProps> = ({
     }
   }, [breadcrumbs]);
 
+  const isSearchView = Boolean(searchQuery && searchQuery.length > 0);
+
   // Resizable column widths (List View & Miller Columns)
   const [listColWidths, setListColWidths] = useState({
     name: 340,
+    path: 260,
     date: 170,
     size: 92,
     kind: 160,
@@ -670,14 +674,14 @@ export const MainView: React.FC<MainViewProps> = ({
   };
 
   const startListColResize = (
-    col: "name" | "date" | "size" | "kind",
+    col: "name" | "path" | "date" | "size" | "kind",
     e: React.MouseEvent<HTMLDivElement>
   ) => {
     e.preventDefault();
     e.stopPropagation();
     const startX = e.clientX;
     const startWidth = listColWidths[col];
-    const minWidths = { name: 140, date: 110, size: 70, kind: 100 };
+    const minWidths = { name: 140, path: 140, date: 110, size: 70, kind: 100 };
     document.body.classList.add("is-resizing-col");
 
     const onMouseMove = (moveEvent: MouseEvent) => {
@@ -698,12 +702,15 @@ export const MainView: React.FC<MainViewProps> = ({
     window.addEventListener("mouseup", onMouseUp);
   };
 
-  const autoFitListCol = (col: "name" | "date" | "size" | "kind") => {
+  const autoFitListCol = (col: "name" | "path" | "date" | "size" | "kind") => {
     let maxW = 0;
     for (const row of flatListRows) {
       if (row.kind !== "entry") continue;
       if (col === "name") {
         const w = 6 + row.depth * 18 + 16 + 5 + 18 + 5 + measureTextPx(row.entry.name) + 20;
+        if (w > maxW) maxW = w;
+      } else if (col === "path") {
+        const w = measureTextPx(getParentPath(row.entry.path)) + 24;
         if (w > maxW) maxW = w;
       } else if (col === "date") {
         const w = measureTextPx(formatDateModified(row.entry.modifiedMs)) + 24;
@@ -716,7 +723,7 @@ export const MainView: React.FC<MainViewProps> = ({
         if (w > maxW) maxW = w;
       }
     }
-    const minWidths = { name: 160, date: 120, size: 76, kind: 110 };
+    const minWidths = { name: 160, path: 160, date: 120, size: 76, kind: 110 };
     const fitted = Math.max(minWidths[col], Math.min(640, maxW));
     setListColWidths((prev) => ({ ...prev, [col]: fitted }));
   };
@@ -1086,7 +1093,9 @@ export const MainView: React.FC<MainViewProps> = ({
 
     if (viewMode === "list") {
       const listGridStyle: React.CSSProperties = {
-        gridTemplateColumns: `${listColWidths.name}px ${listColWidths.date}px ${listColWidths.size}px ${listColWidths.kind}px`,
+        gridTemplateColumns: isSearchView
+          ? `${listColWidths.name}px ${listColWidths.path}px ${listColWidths.date}px ${listColWidths.size}px ${listColWidths.kind}px`
+          : `${listColWidths.name}px ${listColWidths.date}px ${listColWidths.size}px ${listColWidths.kind}px`,
       };
       return (
         <div className="list-view" onClick={handleCanvasClick}>
@@ -1109,6 +1118,20 @@ export const MainView: React.FC<MainViewProps> = ({
                   aria-hidden="true"
                 />
               </div>
+              {isSearchView && (
+                <div className="list-col-hdr-wrap">
+                  <div className="list-col-hdr col-path col-static" role="columnheader">
+                    <span>Path</span>
+                  </div>
+                  <div
+                    className="col-resize-handle"
+                    onMouseDown={(e) => startListColResize("path", e)}
+                    onDoubleClick={() => autoFitListCol("path")}
+                    title="Drag to resize (double-click to auto-fit)"
+                    aria-hidden="true"
+                  />
+                </div>
+              )}
               <div className="list-col-hdr-wrap">
                 <button
                   type="button"
@@ -1178,6 +1201,7 @@ export const MainView: React.FC<MainViewProps> = ({
                       >
                         <span className="list-status-text">{row.text}</span>
                       </span>
+                      {isSearchView && <span className="list-cell col-path" />}
                       <span className="list-cell col-date" />
                       <span className="list-cell col-size" />
                       <span className="list-cell col-kind" />
@@ -1270,6 +1294,11 @@ export const MainView: React.FC<MainViewProps> = ({
                       </span>
                       <span className="list-name-text">{entry.name}</span>
                     </span>
+                    {isSearchView && (
+                      <span className="list-cell col-path" title={entry.path}>
+                        {getParentPath(entry.path)}
+                      </span>
+                    )}
                     <span className="list-cell col-date">
                       {formatDateModified(entry.modifiedMs)}
                     </span>
@@ -1626,7 +1655,6 @@ export const MainView: React.FC<MainViewProps> = ({
   };
 
   const canEmptyTrash = isTrashView && !loading && !emptyingTrash && sortedEntries.length > 0;
-  const isSearchView = Boolean(searchQuery && searchQuery.length > 0);
 
   return (
     <div className="finder-main-wrapper">

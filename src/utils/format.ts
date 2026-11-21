@@ -131,6 +131,27 @@ export function sortEntries(entries: FileEntry[], sort: SortConfig): FileEntry[]
   });
 }
 
+export function getParentPath(fullPath: string): string {
+  if (!fullPath) return "";
+  let trimmed = fullPath;
+  while (
+    trimmed.length > 1 &&
+    (trimmed.endsWith("\\") || trimmed.endsWith("/")) &&
+    !/^[A-Za-z]:[\\/]$/.test(trimmed)
+  ) {
+    trimmed = trimmed.slice(0, -1);
+  }
+  const lastBackslash = trimmed.lastIndexOf("\\");
+  const lastSlash = trimmed.lastIndexOf("/");
+  const sepIdx = Math.max(lastBackslash, lastSlash);
+  if (sepIdx === -1) return trimmed;
+  if (sepIdx === 0) return trimmed.slice(0, 1);
+  if (sepIdx === 2 && /^[A-Za-z]:/.test(trimmed)) {
+    return trimmed.slice(0, 3);
+  }
+  return trimmed.slice(0, sepIdx);
+}
+
 let measureCanvas: HTMLCanvasElement | null = null;
 
 export function measureTextPx(text: string, font = '12.5px Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'): number {

@@ -357,7 +357,7 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
                   </span>
                   {everythingStatus === "missing" && (
                     <span id="setting-everything-cli-hint" className="settings-row-hint">
-                      Everything CLI (es) was not found in PATH. Install it to enable this setting.
+                      Everything CLI (es) was not found in PATH. Use <code>scoop install everything-cli</code> to install.
                     </span>
                   )}
                 </div>
