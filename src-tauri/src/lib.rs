@@ -1911,6 +1911,199 @@ fn save_panel_states(
     store.update_panels(active_panel, panels);
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedGoToPath {
+    pub directory_path: String,
+    pub select_file_path: Option<String>,
+}
+
+fn strip_wrapping_quotes(raw: &str) -> &str {
+    let trimmed = raw.trim();
+    if trimmed.len() >= 2 {
+        let bytes = trimmed.as_bytes();
+        let first = bytes[0];
+        let last = bytes[bytes.len() - 1];
+        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+            return trimmed[1..trimmed.len() - 1].trim();
+        }
+    }
+    trimmed
+}
+
+fn expand_env_vars(input: &str) -> String {
+    let chars: Vec<char> = input.chars().collect();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0;
+
+    while i < chars.len() {
+        if chars[i] == '%' {
+            if let Some(rel_end) = chars[i + 1..].iter().position(|&c| c == '%') {
+                let end = i + 1 + rel_end;
+                let var_name: String = chars[i + 1..end].iter().collect();
+                if !var_name.is_empty()
+                    && !var_name.contains('/')
+                    && !var_name.contains('\\')
+                {
+                    if let Ok(val) = std::env::var(&var_name) {
+                        out.push_str(&val);
+                        i = end + 1;
+                        continue;
+                    }
+                }
+            }
+            out.push('%');
+            i += 1;
+        } else if chars[i] == '$' {
+            if i + 1 < chars.len() && chars[i + 1] == '{' {
+                if let Some(rel_end) = chars[i + 2..].iter().position(|&c| c == '}') {
+                    let end = i + 2 + rel_end;
+                    let var_name: String = chars[i + 2..end].iter().collect();
+                    if !var_name.is_empty() {
+                        if let Ok(val) = std::env::var(&var_name) {
+                            out.push_str(&val);
+                            i = end + 1;
+                            continue;
+                        }
+                    }
+                }
+                out.push('$');
+                i += 1;
+            } else if i + 1 < chars.len() && (chars[i + 1].is_ascii_alphabetic() || chars[i + 1] == '_') {
+                let mut end = i + 2;
+                while end < chars.len() && (chars[end].is_ascii_alphanumeric() || chars[end] == '_') {
+                    end += 1;
+                }
+                let var_name: String = chars[i + 1..end].iter().collect();
+                if let Ok(val) = std::env::var(&var_name) {
+                    out.push_str(&val);
+                    i = end;
+                    continue;
+                }
+                out.push('$');
+                i += 1;
+            } else {
+                out.push('$');
+                i += 1;
+            }
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+
+    out
+}
+
+fn normalize_path_lexical(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    let mut has_root = false;
+
+    for comp in path.components() {
+        match comp {
+            Component::Prefix(prefix) => {
+                out.push(prefix.as_os_str());
+            }
+            Component::RootDir => {
+                has_root = true;
+                out.push(comp.as_os_str());
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if matches!(out.components().next_back(), Some(Component::Normal(_))) {
+                    out.pop();
+                } else if !has_root {
+                    out.push(comp.as_os_str());
+                }
+            }
+            Component::Normal(seg) => {
+                out.push(seg);
+            }
+        }
+    }
+
+    if out.as_os_str().is_empty() {
+        path.to_path_buf()
+    } else {
+        out
+    }
+}
+
+fn resolve_user_path(raw_path: &str, base_dir: Option<&str>) -> Result<ResolvedGoToPath, String> {
+    let cleaned = strip_wrapping_quotes(raw_path);
+    if cleaned.is_empty() {
+        return Err("Please enter a folder or file path.".to_string());
+    }
+
+    let expanded = expand_env_vars(cleaned);
+    let expanded = expanded.trim();
+    if expanded.is_empty() {
+        return Err("Please enter a folder or file path.".to_string());
+    }
+
+    let mut candidate = if expanded == "~" {
+        dirs::home_dir().ok_or_else(|| "Could not locate home directory.".to_string())?
+    } else if let Some(rest) = expanded.strip_prefix("~/").or_else(|| expanded.strip_prefix("~\\")) {
+        let home = dirs::home_dir().ok_or_else(|| "Could not locate home directory.".to_string())?;
+        home.join(rest)
+    } else {
+        #[cfg(target_os = "windows")]
+        let adjusted = if expanded.len() == 2
+            && expanded.as_bytes()[0].is_ascii_alphabetic()
+            && expanded.as_bytes()[1] == b':'
+        {
+            format!("{}\\", expanded)
+        } else {
+            expanded.to_string()
+        };
+
+        #[cfg(not(target_os = "windows"))]
+        let adjusted = expanded.to_string();
+
+        PathBuf::from(adjusted)
+    };
+
+    if !candidate.is_absolute() {
+        let base = base_dir
+            .map(str::trim)
+            .filter(|b| !b.is_empty() && !b.starts_with("virtual://"))
+            .map(PathBuf::from)
+            .filter(|p| p.is_dir())
+            .or_else(dirs::home_dir)
+            .ok_or_else(|| "Could not determine base folder for relative path.".to_string())?;
+        candidate = base.join(candidate);
+    }
+
+    let resolved = normalize_path_lexical(&candidate);
+
+    let metadata = fs::metadata(&resolved)
+        .map_err(|_| format!("The folder \"{}\" can't be found.", cleaned))?;
+
+    if metadata.is_dir() {
+        Ok(ResolvedGoToPath {
+            directory_path: resolved.to_string_lossy().into_owned(),
+            select_file_path: None,
+        })
+    } else {
+        let parent = resolved
+            .parent()
+            .filter(|p| p.is_dir())
+            .ok_or_else(|| format!("Cannot open parent folder for \"{}\".", cleaned))?;
+        Ok(ResolvedGoToPath {
+            directory_path: parent.to_string_lossy().into_owned(),
+            select_file_path: Some(resolved.to_string_lossy().into_owned()),
+        })
+    }
+}
+
+#[tauri::command]
+fn resolve_go_to_path(
+    raw_path: String,
+    base_dir: Option<String>,
+) -> Result<ResolvedGoToPath, String> {
+    resolve_user_path(&raw_path, base_dir.as_deref())
+}
+
 #[tauri::command]
 fn resolve_panel_path(saved_path: Option<String>, root_path: String) -> String {
     resolve_existing_dir(saved_path.as_deref(), &root_path)
@@ -2077,6 +2270,7 @@ pub fn run() {
             load_app_state,
             save_panel_states,
             resolve_panel_path,
+            resolve_go_to_path,
             save_custom_favorites,
             check_directory_exists,
             validate_favorite_dirs,
@@ -2209,5 +2403,67 @@ mod tests {
         assert_eq!(resolve_existing_dir(Some(&missing_sub_str), &root_str), sub_str);
 
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn strip_wrapping_quotes_handles_double_and_single() {
+        assert_eq!(strip_wrapping_quotes("  \"C:\\Users\\test\"  "), "C:\\Users\\test");
+        assert_eq!(strip_wrapping_quotes("'~/Documents'"), "~/Documents");
+        assert_eq!(strip_wrapping_quotes("\"unmatched"), "\"unmatched");
+    }
+
+    #[test]
+    fn expand_env_vars_supports_windows_and_unix_syntax() {
+        std::env::set_var("WINFINDER_TEST_VAR", "WinFinderVal");
+        assert_eq!(expand_env_vars("%WINFINDER_TEST_VAR%/sub"), "WinFinderVal/sub");
+        assert_eq!(expand_env_vars("$WINFINDER_TEST_VAR/sub"), "WinFinderVal/sub");
+        assert_eq!(expand_env_vars("${WINFINDER_TEST_VAR}/sub"), "WinFinderVal/sub");
+        assert_eq!(expand_env_vars("%WINFINDER_NONEXISTENT_XYZ%"), "%WINFINDER_NONEXISTENT_XYZ%");
+        std::env::remove_var("WINFINDER_TEST_VAR");
+    }
+
+    #[test]
+    fn resolve_user_path_handles_dir_file_relative_quotes_and_missing() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "winfinder_goto_test_{}",
+            std::process::id()
+        ));
+        let sub_dir = temp_root.join("nested");
+        let file_path = sub_dir.join("hello.txt");
+        let _ = fs::remove_dir_all(&temp_root);
+        fs::create_dir_all(&sub_dir).unwrap();
+        fs::write(&file_path, "hi").unwrap();
+
+        // Quoted directory path
+        let quoted_dir = format!("\"{}\"", sub_dir.to_string_lossy());
+        let res_dir = resolve_user_path(&quoted_dir, None).unwrap();
+        assert_eq!(PathBuf::from(&res_dir.directory_path), sub_dir);
+        assert!(res_dir.select_file_path.is_none());
+
+        // File path resolves to parent dir + select_file_path
+        let res_file = resolve_user_path(&file_path.to_string_lossy(), None).unwrap();
+        assert_eq!(PathBuf::from(&res_file.directory_path), sub_dir);
+        assert_eq!(res_file.select_file_path.map(PathBuf::from), Some(file_path.clone()));
+
+        // Relative path against base_dir
+        let res_rel = resolve_user_path("nested", Some(&temp_root.to_string_lossy())).unwrap();
+        assert_eq!(PathBuf::from(&res_rel.directory_path), sub_dir);
+        assert!(res_rel.select_file_path.is_none());
+
+        // Tilde resolves to home directory
+        if let Some(home) = dirs::home_dir() {
+            let res_home = resolve_user_path("~", None).unwrap();
+            assert_eq!(PathBuf::from(&res_home.directory_path), home);
+        }
+
+        // Missing path returns error
+        let missing = temp_root.join("does_not_exist_12345");
+        let err = resolve_user_path(&missing.to_string_lossy(), None).unwrap_err();
+        assert!(err.contains("can't be found"));
+
+        // Empty input returns error
+        assert!(resolve_user_path("   \"\"   ", None).is_err());
+
+        let _ = fs::remove_dir_all(&temp_root);
     }
 }
