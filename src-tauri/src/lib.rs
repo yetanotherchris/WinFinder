@@ -1,8 +1,323 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, UNIX_EPOCH};
+use tauri::Manager;
+
+const TRACKED_PANELS: &[&str] = &["recents", "desktop", "documents", "downloads", "home"];
+
+fn is_tracked_panel(panel_id: &str) -> bool {
+    TRACKED_PANELS.contains(&panel_id)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct WindowState {
+    pub width: u32,
+    pub height: u32,
+    pub x: Option<i32>,
+    pub y: Option<i32>,
+    pub maximized: bool,
+}
+
+impl Default for WindowState {
+    fn default() -> Self {
+        Self {
+            width: 1040,
+            height: 660,
+            x: None,
+            y: None,
+            maximized: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PersistedSortConfig {
+    pub field: String,
+    pub direction: String,
+    pub folders_first: bool,
+}
+
+impl Default for PersistedSortConfig {
+    fn default() -> Self {
+        Self {
+            field: "name".to_string(),
+            direction: "asc".to_string(),
+            folders_first: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PanelState {
+    pub view_mode: String,
+    pub sort: PersistedSortConfig,
+    pub last_path: Option<String>,
+    pub expanded_paths: Vec<String>,
+    pub column_paths: Vec<String>,
+}
+
+impl Default for PanelState {
+    fn default() -> Self {
+        Self {
+            view_mode: "icons".to_string(),
+            sort: PersistedSortConfig::default(),
+            last_path: None,
+            expanded_paths: Vec::new(),
+            column_paths: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PersistedAppState {
+    pub window: Option<WindowState>,
+    pub active_panel: String,
+    pub panels: BTreeMap<String, PanelState>,
+}
+
+impl Default for PersistedAppState {
+    fn default() -> Self {
+        Self {
+            window: None,
+            active_panel: "home".to_string(),
+            panels: BTreeMap::new(),
+        }
+    }
+}
+
+impl PersistedAppState {
+    fn sanitize(&mut self) {
+        if !is_tracked_panel(&self.active_panel) {
+            self.active_panel = "home".to_string();
+        }
+        self.panels.retain(|k, _| is_tracked_panel(k));
+        for panel in self.panels.values_mut() {
+            if !matches!(
+                panel.view_mode.as_str(),
+                "icons" | "list" | "columns" | "gallery"
+            ) {
+                panel.view_mode = "icons".to_string();
+            }
+            if !matches!(
+                panel.sort.field.as_str(),
+                "name" | "kind" | "dateModified" | "size"
+            ) {
+                panel.sort.field = "name".to_string();
+            }
+            if !matches!(panel.sort.direction.as_str(), "asc" | "desc") {
+                panel.sort.direction = "asc".to_string();
+            }
+        }
+    }
+}
+
+struct AppStateStore {
+    state_path: Option<PathBuf>,
+    state: Mutex<PersistedAppState>,
+    dirty: Mutex<bool>,
+    dirty_cv: Condvar,
+}
+
+impl AppStateStore {
+    fn load() -> Arc<Self> {
+        let state_path = dirs::home_dir().map(|h| h.join(".winfinder"));
+        let mut initial = state_path
+            .as_ref()
+            .and_then(|p| fs::read_to_string(p).ok())
+            .and_then(|raw| serde_json::from_str::<PersistedAppState>(&raw).ok())
+            .unwrap_or_default();
+        initial.sanitize();
+
+        let store = Arc::new(Self {
+            state_path,
+            state: Mutex::new(initial),
+            dirty: Mutex::new(false),
+            dirty_cv: Condvar::new(),
+        });
+        store.start_debounced_writer();
+        store
+    }
+
+    fn start_debounced_writer(self: &Arc<Self>) {
+        let store = Arc::clone(self);
+        std::thread::spawn(move || {
+            let flush_interval = Duration::from_secs(5);
+            loop {
+                let mut dirty = store.dirty.lock().unwrap();
+                while !*dirty {
+                    dirty = store.dirty_cv.wait(dirty).unwrap();
+                }
+                drop(dirty);
+
+                // Batch dirty state changes and flush to ~/.winfinder every 5 seconds
+                std::thread::sleep(flush_interval);
+
+                let mut dirty = store.dirty.lock().unwrap();
+                if *dirty {
+                    *dirty = false;
+                    drop(dirty);
+                    store.save_now();
+                }
+            }
+        });
+    }
+
+    fn schedule_save(&self) {
+        let mut dirty = self.dirty.lock().unwrap();
+        *dirty = true;
+        self.dirty_cv.notify_one();
+    }
+
+    fn save_now(&self) {
+        let Some(path) = &self.state_path else {
+            return;
+        };
+        let snapshot = self.state.lock().unwrap().clone();
+        let Ok(json) = serde_json::to_string_pretty(&snapshot) else {
+            return;
+        };
+        let tmp_path = path.with_file_name(".winfinder.tmp");
+        if fs::write(&tmp_path, &json).is_ok() {
+            if fs::rename(&tmp_path, path).is_ok() {
+                return;
+            }
+            let _ = fs::remove_file(&tmp_path);
+        }
+        let _ = fs::write(path, json);
+    }
+
+    fn snapshot(&self) -> PersistedAppState {
+        self.state.lock().unwrap().clone()
+    }
+
+    fn update_window_size(&self, width: u32, height: u32, maximized: bool) {
+        let mut guard = self.state.lock().unwrap();
+        let win = guard.window.get_or_insert_with(WindowState::default);
+        win.maximized = maximized;
+        if !maximized && width >= 200 && height >= 200 {
+            win.width = width;
+            win.height = height;
+        }
+        drop(guard);
+        self.schedule_save();
+    }
+
+    fn update_window_position(&self, x: i32, y: i32) {
+        let mut guard = self.state.lock().unwrap();
+        let win = guard.window.get_or_insert_with(WindowState::default);
+        win.x = Some(x);
+        win.y = Some(y);
+        drop(guard);
+        self.schedule_save();
+    }
+
+    fn update_panels(&self, active_panel: String, panels: BTreeMap<String, PanelState>) {
+        let mut guard = self.state.lock().unwrap();
+        if is_tracked_panel(&active_panel) {
+            guard.active_panel = active_panel;
+        }
+        guard.panels = panels
+            .into_iter()
+            .filter(|(k, _)| is_tracked_panel(k))
+            .collect();
+        guard.sanitize();
+        drop(guard);
+        self.schedule_save();
+    }
+}
+
+fn is_rect_visible_on_monitors(
+    window: &tauri::WebviewWindow,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+) -> bool {
+    let Ok(monitors) = window.available_monitors() else {
+        return true;
+    };
+    if monitors.is_empty() {
+        return true;
+    }
+
+    let win_right = x.saturating_add(width as i32);
+    let win_bottom = y.saturating_add(height as i32);
+
+    monitors.iter().any(|m| {
+        let pos = m.position();
+        let size = m.size();
+        let mon_left = pos.x;
+        let mon_top = pos.y;
+        let mon_right = mon_left.saturating_add(size.width as i32);
+        let mon_bottom = mon_top.saturating_add(size.height as i32);
+
+        let overlap_x = win_right.min(mon_right) - x.max(mon_left);
+        let overlap_y = win_bottom.min(mon_bottom) - y.max(mon_top);
+        overlap_x >= 80 && overlap_y >= 60
+    })
+}
+
+fn restore_window_state(window: &tauri::WebviewWindow, state: &WindowState) {
+    let width = state.width.max(700);
+    let height = state.height.max(420);
+    let _ = window.set_size(tauri::Size::Physical(tauri::PhysicalSize::new(
+        width, height,
+    )));
+
+    if let (Some(x), Some(y)) = (state.x, state.y) {
+        if is_rect_visible_on_monitors(window, x, y, width, height) {
+            let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
+                x, y,
+            )));
+        } else {
+            let _ = window.center();
+        }
+    }
+
+    if state.maximized {
+        let _ = window.maximize();
+    }
+}
+
+fn resolve_existing_dir(saved_path: Option<&str>, root_path: &str) -> String {
+    if root_path.starts_with("virtual://") {
+        return root_path.to_string();
+    }
+
+    if let Some(raw) = saved_path {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() && !trimmed.starts_with("virtual://") {
+            let mut candidate = PathBuf::from(trimmed);
+            loop {
+                if candidate.is_dir() {
+                    return candidate.to_string_lossy().into_owned();
+                }
+                match candidate.parent() {
+                    Some(parent) if parent != candidate.as_path() => {
+                        candidate = parent.to_path_buf();
+                    }
+                    _ => break,
+                }
+            }
+        }
+    }
+
+    let root = Path::new(root_path);
+    if root.is_dir() {
+        return root_path.to_string();
+    }
+
+    dirs::home_dir()
+        .map(|h| h.to_string_lossy().into_owned())
+        .unwrap_or_else(|| root_path.to_string())
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1274,13 +1589,89 @@ async fn share_with_os(window: tauri::Window, path: String) -> Result<(), String
     }
 }
 
+#[tauri::command]
+fn load_app_state(store: tauri::State<'_, Arc<AppStateStore>>) -> PersistedAppState {
+    store.snapshot()
+}
+
+#[tauri::command]
+fn save_panel_states(
+    active_panel: String,
+    panels: BTreeMap<String, PanelState>,
+    store: tauri::State<'_, Arc<AppStateStore>>,
+) {
+    store.update_panels(active_panel, panels);
+}
+
+#[tauri::command]
+fn resolve_panel_path(saved_path: Option<String>, root_path: String) -> String {
+    resolve_existing_dir(saved_path.as_deref(), &root_path)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let apps_cache = AppsCache::new();
     apps_cache.start_preload();
+    let state_store = AppStateStore::load();
 
     tauri::Builder::default()
         .manage(apps_cache)
+        .manage(Arc::clone(&state_store))
+        .setup(|app| {
+            if let Some(window) = app.get_webview_window("main") {
+                let store = app.state::<Arc<AppStateStore>>();
+                let snapshot = store.snapshot();
+                if let Some(win_state) = &snapshot.window {
+                    restore_window_state(&window, win_state);
+                }
+            }
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            if window.label() != "main" {
+                return;
+            }
+            let store = window.state::<Arc<AppStateStore>>();
+            match event {
+                tauri::WindowEvent::Resized(size) => {
+                    if size.width == 0 || size.height == 0 {
+                        return;
+                    }
+                    if window.is_minimized().unwrap_or(false) {
+                        return;
+                    }
+                    let maximized = window.is_maximized().unwrap_or(false);
+                    store.update_window_size(size.width, size.height, maximized);
+                }
+                tauri::WindowEvent::Moved(pos) => {
+                    if window.is_minimized().unwrap_or(false) {
+                        return;
+                    }
+                    let maximized = window.is_maximized().unwrap_or(false);
+                    if !maximized {
+                        store.update_window_position(pos.x, pos.y);
+                    }
+                }
+                tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed => {
+                    // Capture current bounds if window state was never recorded yet
+                    if !window.is_minimized().unwrap_or(false) {
+                        let maximized = window.is_maximized().unwrap_or(false);
+                        if let Ok(size) = window.inner_size() {
+                            if size.width > 0 && size.height > 0 {
+                                store.update_window_size(size.width, size.height, maximized);
+                            }
+                        }
+                        if !maximized {
+                            if let Ok(pos) = window.outer_position() {
+                                store.update_window_position(pos.x, pos.y);
+                            }
+                        }
+                    }
+                    store.save_now();
+                }
+                _ => {}
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             get_home_dir,
             get_sidebar_locations,
@@ -1291,7 +1682,10 @@ pub fn run() {
             reveal_in_file_manager,
             create_new_folder,
             open_in_terminal,
-            share_with_os
+            share_with_os,
+            load_app_state,
+            save_panel_states,
+            resolve_panel_path
         ])
         .run(tauri::generate_context!())
         .expect("error while running WinFinder");

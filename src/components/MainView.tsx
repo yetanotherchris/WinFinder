@@ -27,6 +27,12 @@ import {
   sortEntries,
 } from "../utils/format";
 import { FileIcon } from "./FileIcon";
+import {
+  entriesEqual,
+  getCachedDirectory,
+  invalidateCachedDirectory,
+  setCachedDirectory,
+} from "../utils/dirCache";
 
 interface MainViewProps {
   currentPath: string;
@@ -37,6 +43,8 @@ interface MainViewProps {
   viewMode: ViewMode;
   sortConfig: SortConfig;
   showHidden: boolean;
+  expandedPaths: string[];
+  columnPaths: string[];
   loading: boolean;
   loadingMessage?: string;
   error: string | null;
@@ -46,6 +54,8 @@ interface MainViewProps {
   onOpenItem: (entry: FileEntry) => void;
   onContextMenu: (entry: FileEntry) => void;
   onChangeSort: (next: SortConfig) => void;
+  onExpandedPathsChange: (paths: string[]) => void;
+  onColumnPathsChange: (paths: string[]) => void;
 }
 
 interface MillerColumn {
@@ -97,6 +107,8 @@ export const MainView: React.FC<MainViewProps> = ({
   viewMode,
   sortConfig,
   showHidden,
+  expandedPaths,
+  columnPaths,
   loading,
   loadingMessage,
   error,
@@ -106,6 +118,8 @@ export const MainView: React.FC<MainViewProps> = ({
   onOpenItem,
   onContextMenu,
   onChangeSort,
+  onExpandedPathsChange,
+  onColumnPathsChange,
 }) => {
   const sortedEntries = useMemo(
     () => sortEntries(entries, sortConfig),
@@ -128,30 +142,201 @@ export const MainView: React.FC<MainViewProps> = ({
   const [defaultMillerWidth, setDefaultMillerWidth] = useState<number>(230);
   const [millerWidths, setMillerWidths] = useState<Record<number, number>>({});
 
-  // List View inline folder disclosure state
+  // List View inline folder disclosure state & Miller Columns persistence refs
   const [expandedFolders, setExpandedFolders] = useState<Record<string, ExpandedFolderState>>({});
+  const expandedPathsRef = useRef<string[]>(expandedPaths);
+  expandedPathsRef.current = expandedPaths;
+  const onExpandedPathsChangeRef = useRef(onExpandedPathsChange);
+  onExpandedPathsChangeRef.current = onExpandedPathsChange;
+  const columnPathsRef = useRef<string[]>(columnPaths);
+  columnPathsRef.current = columnPaths;
+  const onColumnPathsChangeRef = useRef(onColumnPathsChange);
+  onColumnPathsChangeRef.current = onColumnPathsChange;
+  const restoreSeqRef = useRef(0);
 
-  // Reset sub-columns & expanded folders when root location, view mode, or hidden visibility changes
+  // Restore saved expanded folders (List View) or sub-columns (Miller Columns) when root location, view mode, or hidden visibility changes
   useEffect(() => {
-    setSubColumns([]);
     setColumnPreview(null);
-    setExpandedFolders({});
+    const seq = ++restoreSeqRef.current;
+    let cancelled = false;
+
+    // 1. Miller Columns restoration
+    if (viewMode === "columns" && currentPath && columnPathsRef.current.length > 0 && isTauriRuntime()) {
+      const savedCols = columnPathsRef.current;
+      setExpandedFolders({});
+
+      // Synchronously hydrate any cached sub-columns on frame 0
+      const initialCols: MillerColumn[] = [];
+      for (let i = 0; i < savedCols.length; i++) {
+        const colPath = savedCols[i];
+        const cached = getCachedDirectory(colPath, showHidden);
+        if (!cached) break;
+        initialCols.push({
+          path: cached.currentPath,
+          entries: cached.entries,
+          selectedPath: savedCols[i + 1] ?? null,
+          loading: false,
+          error: null,
+        });
+      }
+      setSubColumns(initialCols);
+      if (initialCols.length > 0) {
+        requestAnimationFrame(() => {
+          if (columnsScrollRef.current) {
+            columnsScrollRef.current.scrollLeft = columnsScrollRef.current.scrollWidth;
+          }
+        });
+      }
+
+      // Silently revalidate all saved columns in parallel; truncate at first missing folder
+      (async () => {
+        const results = await Promise.all(
+          savedCols.map(async (colPath) => {
+            try {
+              const listing = await invoke<DirectoryListing>("list_directory", {
+                path: colPath,
+                showHidden,
+              });
+              setCachedDirectory(colPath, showHidden, listing);
+              return { path: listing.currentPath, entries: listing.entries, ok: true as const };
+            } catch {
+              invalidateCachedDirectory(colPath);
+              return { path: colPath, entries: [] as FileEntry[], ok: false as const };
+            }
+          })
+        );
+
+        if (cancelled || seq !== restoreSeqRef.current) return;
+
+        const validCols: MillerColumn[] = [];
+        const validPaths: string[] = [];
+        for (const r of results) {
+          if (!r.ok) break;
+          validPaths.push(r.path);
+          validCols.push({
+            path: r.path,
+            entries: r.entries,
+            selectedPath: null,
+            loading: false,
+            error: null,
+          });
+        }
+        for (let i = 0; i < validCols.length - 1; i++) {
+          validCols[i].selectedPath = validCols[i + 1].path;
+        }
+
+        let changed = validCols.length !== initialCols.length;
+        if (!changed) {
+          for (let i = 0; i < validCols.length; i++) {
+            if (
+              validCols[i].path !== initialCols[i].path ||
+              validCols[i].selectedPath !== initialCols[i].selectedPath ||
+              !entriesEqual(validCols[i].entries, initialCols[i].entries)
+            ) {
+              changed = true;
+              break;
+            }
+          }
+        }
+
+        if (changed) {
+          setSubColumns(validCols);
+          requestAnimationFrame(() => {
+            if (columnsScrollRef.current) {
+              columnsScrollRef.current.scrollLeft = columnsScrollRef.current.scrollWidth;
+            }
+          });
+        }
+        if (validPaths.length !== savedCols.length) {
+          onColumnPathsChangeRef.current(validPaths);
+        }
+      })();
+
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    setSubColumns([]);
+
+    // 2. List View expanded folders restoration
+    const savedPaths = expandedPathsRef.current;
+    if (viewMode !== "list" || !currentPath || savedPaths.length === 0 || !isTauriRuntime()) {
+      setExpandedFolders({});
+      return;
+    }
+
+    // Synchronously hydrate any cached expanded folders on frame 0
+    const initialExpanded: Record<string, ExpandedFolderState> = {};
+    for (const folderPath of savedPaths) {
+      const cached = getCachedDirectory(folderPath, showHidden);
+      if (cached) {
+        initialExpanded[folderPath] = {
+          entries: cached.entries,
+          loading: false,
+          error: null,
+        };
+      }
+    }
+    setExpandedFolders(initialExpanded);
+
+    // Silently revalidate all saved expanded folders in the background
+    (async () => {
+      const results = await Promise.all(
+        savedPaths.map(async (folderPath) => {
+          try {
+            const listing = await invoke<DirectoryListing>("list_directory", {
+              path: folderPath,
+              showHidden,
+            });
+            setCachedDirectory(folderPath, showHidden, listing);
+            return { folderPath, entries: listing.entries, ok: true as const };
+          } catch {
+            invalidateCachedDirectory(folderPath);
+            return { folderPath, entries: [] as FileEntry[], ok: false as const };
+          }
+        })
+      );
+
+      if (cancelled || seq !== restoreSeqRef.current) return;
+
+      let changed = Object.keys(initialExpanded).length !== results.filter((r) => r.ok).length;
+      const restored: Record<string, ExpandedFolderState> = {};
+      const validPaths: string[] = [];
+      for (const r of results) {
+        if (r.ok) {
+          restored[r.folderPath] = { entries: r.entries, loading: false, error: null };
+          validPaths.push(r.folderPath);
+          const prev = initialExpanded[r.folderPath];
+          if (!prev || !entriesEqual(prev.entries, r.entries)) {
+            changed = true;
+          }
+        }
+      }
+      if (changed) {
+        setExpandedFolders(restored);
+      }
+      if (validPaths.length !== savedPaths.length) {
+        onExpandedPathsChangeRef.current(validPaths);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, [currentPath, viewMode, showHidden]);
 
   const toggleExpandFolder = async (folderPath: string) => {
     if (expandedFolders[folderPath]) {
-      setExpandedFolders((prev) => {
-        const next = { ...prev };
-        delete next[folderPath];
-        return next;
-      });
+      const nextMap = { ...expandedFolders };
+      delete nextMap[folderPath];
+      setExpandedFolders(nextMap);
+      onExpandedPathsChange(Object.keys(nextMap));
       return;
     }
 
-    setExpandedFolders((prev) => ({
-      ...prev,
-      [folderPath]: { entries: [], loading: true, error: null },
-    }));
+    const nextPaths = Array.from(new Set([...Object.keys(expandedFolders), folderPath]));
+    onExpandedPathsChange(nextPaths);
 
     if (!isTauriRuntime()) {
       setExpandedFolders((prev) => ({
@@ -161,30 +346,68 @@ export const MainView: React.FC<MainViewProps> = ({
       return;
     }
 
+    const cached = getCachedDirectory(folderPath, showHidden);
+    if (cached) {
+      // Instant expand from cache, then silently revalidate in background
+      setExpandedFolders((prev) => ({
+        ...prev,
+        [folderPath]: { entries: cached.entries, loading: false, error: null },
+      }));
+      try {
+        const fresh = await invoke<DirectoryListing>("list_directory", {
+          path: folderPath,
+          showHidden,
+        });
+        setCachedDirectory(folderPath, showHidden, fresh);
+        if (!entriesEqual(cached.entries, fresh.entries)) {
+          setExpandedFolders((prev) => {
+            if (!prev[folderPath]) return prev;
+            return {
+              ...prev,
+              [folderPath]: { entries: fresh.entries, loading: false, error: null },
+            };
+          });
+        }
+      } catch {
+        invalidateCachedDirectory(folderPath);
+      }
+      return;
+    }
+
+    // Cache miss: delay showing the "Loading…" row so fast local folders expand in a single clean paint
+    let settled = false;
+    const loadingTimer = window.setTimeout(() => {
+      if (!settled) {
+        setExpandedFolders((prev) => ({
+          ...prev,
+          [folderPath]: { entries: [], loading: true, error: null },
+        }));
+      }
+    }, 120);
+
     try {
       const result = await invoke<DirectoryListing>("list_directory", {
         path: folderPath,
         showHidden,
       });
-      setExpandedFolders((prev) => {
-        if (!prev[folderPath]) return prev;
-        return {
-          ...prev,
-          [folderPath]: { entries: result.entries, loading: false, error: null },
-        };
-      });
+      settled = true;
+      window.clearTimeout(loadingTimer);
+      setCachedDirectory(folderPath, showHidden, result);
+      setExpandedFolders((prev) => ({
+        ...prev,
+        [folderPath]: { entries: result.entries, loading: false, error: null },
+      }));
     } catch (err) {
-      setExpandedFolders((prev) => {
-        if (!prev[folderPath]) return prev;
-        return {
-          ...prev,
-          [folderPath]: {
-            entries: [],
-            loading: false,
-            error: typeof err === "string" ? err : String(err),
-          },
-        };
-      });
+      settled = true;
+      window.clearTimeout(loadingTimer);
+      setExpandedFolders((prev) => ({
+        ...prev,
+        [folderPath]: {
+          entries: [],
+          loading: false,
+          error: typeof err === "string" ? err : String(err),
+        },
+      }));
     }
   };
 
@@ -390,10 +613,13 @@ export const MainView: React.FC<MainViewProps> = ({
     }
 
     // Truncate any columns to the right of colIndex
-    const baseSubCols = subColumns.slice(0, colIndex);
+    const baseSubCols = subColumns.slice(0, colIndex).map((col, idx) =>
+      idx === colIndex - 1 ? { ...col, selectedPath: entry.path } : col
+    );
 
     if (!entry.isDir) {
       setSubColumns(baseSubCols);
+      onColumnPathsChange(baseSubCols.map((c) => c.path));
       setColumnPreview(entry);
       requestAnimationFrame(() => {
         if (columnsScrollRef.current) {
@@ -405,35 +631,95 @@ export const MainView: React.FC<MainViewProps> = ({
 
     setColumnPreview(null);
     const reqId = ++columnReqIdRef.current;
-
-    const loadingCol: MillerColumn = {
-      path: entry.path,
-      entries: [],
-      selectedPath: null,
-      loading: true,
-      error: null,
-    };
-    setSubColumns([...baseSubCols, loadingCol]);
-
-    requestAnimationFrame(() => {
-      if (columnsScrollRef.current) {
-        columnsScrollRef.current.scrollLeft = columnsScrollRef.current.scrollWidth;
-      }
-    });
+    onColumnPathsChange([...baseSubCols.map((c) => c.path), entry.path]);
 
     if (!isTauriRuntime()) {
       setSubColumns([
         ...baseSubCols,
-        { ...loadingCol, loading: false, entries: [] },
+        {
+          path: entry.path,
+          entries: [],
+          selectedPath: null,
+          loading: false,
+          error: null,
+        },
       ]);
       return;
     }
+
+    const scrollRight = () => {
+      requestAnimationFrame(() => {
+        if (columnsScrollRef.current) {
+          columnsScrollRef.current.scrollLeft = columnsScrollRef.current.scrollWidth;
+        }
+      });
+    };
+
+    const cached = getCachedDirectory(entry.path, showHidden);
+    if (cached) {
+      setSubColumns([
+        ...baseSubCols,
+        {
+          path: cached.currentPath,
+          entries: cached.entries,
+          selectedPath: null,
+          loading: false,
+          error: null,
+        },
+      ]);
+      scrollRight();
+
+      try {
+        const fresh = await invoke<DirectoryListing>("list_directory", {
+          path: entry.path,
+          showHidden,
+        });
+        setCachedDirectory(entry.path, showHidden, fresh);
+        if (reqId !== columnReqIdRef.current) return;
+        if (!entriesEqual(cached.entries, fresh.entries)) {
+          setSubColumns((prev) => {
+            const next = prev.slice(0, colIndex);
+            next.push({
+              path: fresh.currentPath,
+              entries: fresh.entries,
+              selectedPath: null,
+              loading: false,
+              error: null,
+            });
+            return next;
+          });
+        }
+      } catch {
+        invalidateCachedDirectory(entry.path);
+      }
+      return;
+    }
+
+    let settled = false;
+    const loadingTimer = window.setTimeout(() => {
+      if (!settled && reqId === columnReqIdRef.current) {
+        setSubColumns([
+          ...baseSubCols,
+          {
+            path: entry.path,
+            entries: [],
+            selectedPath: null,
+            loading: true,
+            error: null,
+          },
+        ]);
+        scrollRight();
+      }
+    }, 120);
 
     try {
       const result = await invoke<DirectoryListing>("list_directory", {
         path: entry.path,
         showHidden,
       });
+      settled = true;
+      window.clearTimeout(loadingTimer);
+      setCachedDirectory(entry.path, showHidden, result);
       if (reqId !== columnReqIdRef.current) return;
       setSubColumns((prev) => {
         const next = prev.slice(0, colIndex);
@@ -446,7 +732,10 @@ export const MainView: React.FC<MainViewProps> = ({
         });
         return next;
       });
+      scrollRight();
     } catch (err) {
+      settled = true;
+      window.clearTimeout(loadingTimer);
       if (reqId !== columnReqIdRef.current) return;
       setSubColumns((prev) => {
         const next = prev.slice(0, colIndex);
@@ -459,6 +748,7 @@ export const MainView: React.FC<MainViewProps> = ({
         });
         return next;
       });
+      scrollRight();
     }
   };
 
@@ -478,7 +768,7 @@ export const MainView: React.FC<MainViewProps> = ({
     {
       path: currentPath,
       entries: sortedEntries,
-      selectedPath,
+      selectedPath: subColumns[0]?.path ?? selectedPath,
       loading: false,
       error: null,
     },

@@ -44,3 +44,33 @@ export interface SidebarLocations {
   documentsPath: string | null;
   downloadsPath: string | null;
 }
+
+export type PanelId =
+  | "recents"
+  | "applications"
+  | "desktop"
+  | "documents"
+  | "downloads"
+  | "home"
+  | "drives"
+  | "network";
+
+export type TrackedPanelId =
+  | "recents"
+  | "desktop"
+  | "documents"
+  | "downloads"
+  | "home";
+
+export interface PanelState {
+  viewMode: ViewMode;
+  sort: SortConfig;
+  lastPath: string | null;
+  expandedPaths: string[];
+  columnPaths: string[];
+}
+
+export interface PersistedAppState {
+  activePanel: TrackedPanelId;
+  panels: Partial<Record<TrackedPanelId, PanelState>>;
+}

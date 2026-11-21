@@ -9,30 +9,25 @@ import {
   HardDrive,
   Globe,
 } from "lucide-react";
-import type { SidebarLocations } from "../types";
+import type { PanelId, SidebarLocations } from "../types";
 
 interface SidebarProps {
   locations: SidebarLocations | null;
-  currentPath: string;
+  activePanel: PanelId;
   width: number;
   onResizeWidth: (width: number) => void;
-  onNavigate: (targetPath: string) => void;
+  onSelectPanel: (panel: PanelId) => void;
   onWindowClose: () => void;
   onWindowMinimize: () => void;
   onWindowMaximize: () => void;
 }
 
-function pathsEqual(a: string | null | undefined, b: string | null | undefined): boolean {
-  if (!a || !b) return false;
-  return a.replace(/[\\/]+$/, "").toLowerCase() === b.replace(/[\\/]+$/, "").toLowerCase();
-}
-
 export const Sidebar: React.FC<SidebarProps> = ({
   locations,
-  currentPath,
+  activePanel,
   width,
   onResizeWidth,
-  onNavigate,
+  onSelectPanel,
   onWindowClose,
   onWindowMinimize,
   onWindowMaximize,
@@ -129,8 +124,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
             <li>
               <button
                 type="button"
-                className={`sidebar-item interactive ${currentPath === "virtual://recents" ? "active" : ""}`}
-                onClick={() => onNavigate("virtual://recents")}
+                className={`sidebar-item interactive ${activePanel === "recents" ? "active" : ""}`}
+                onClick={() => onSelectPanel("recents")}
                 title="Recents"
               >
                 <Clock className="sidebar-icon accent-blue" size={16} strokeWidth={1.8} />
@@ -140,8 +135,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
             <li>
               <button
                 type="button"
-                className={`sidebar-item interactive ${currentPath === "virtual://applications" ? "active" : ""}`}
-                onClick={() => onNavigate("virtual://applications")}
+                className={`sidebar-item interactive ${activePanel === "applications" ? "active" : ""}`}
+                onClick={() => onSelectPanel("applications")}
                 title="Applications"
               >
                 <LayoutGrid className="sidebar-icon accent-blue" size={16} strokeWidth={1.8} />
@@ -152,8 +147,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <li>
                 <button
                   type="button"
-                  className={`sidebar-item interactive ${pathsEqual(currentPath, locations.desktopPath) ? "active" : ""}`}
-                  onClick={() => onNavigate(locations.desktopPath!)}
+                  className={`sidebar-item interactive ${activePanel === "desktop" ? "active" : ""}`}
+                  onClick={() => onSelectPanel("desktop")}
                   title="Desktop"
                 >
                   <Monitor className="sidebar-icon accent-blue" size={16} strokeWidth={1.8} />
@@ -165,8 +160,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <li>
                 <button
                   type="button"
-                  className={`sidebar-item interactive ${pathsEqual(currentPath, locations.documentsPath) ? "active" : ""}`}
-                  onClick={() => onNavigate(locations.documentsPath!)}
+                  className={`sidebar-item interactive ${activePanel === "documents" ? "active" : ""}`}
+                  onClick={() => onSelectPanel("documents")}
                   title="Documents"
                 >
                   <FileText className="sidebar-icon accent-blue" size={16} strokeWidth={1.8} />
@@ -178,8 +173,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <li>
                 <button
                   type="button"
-                  className={`sidebar-item interactive ${pathsEqual(currentPath, locations.downloadsPath) ? "active" : ""}`}
-                  onClick={() => onNavigate(locations.downloadsPath!)}
+                  className={`sidebar-item interactive ${activePanel === "downloads" ? "active" : ""}`}
+                  onClick={() => onSelectPanel("downloads")}
                   title="Downloads"
                 >
                   <ArrowDownCircle className="sidebar-icon accent-blue" size={16} strokeWidth={1.8} />
@@ -190,8 +185,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
             <li>
               <button
                 type="button"
-                className={`sidebar-item interactive ${pathsEqual(currentPath, locations?.homePath) ? "active" : ""}`}
-                onClick={() => onNavigate(locations?.homePath ?? "")}
+                className={`sidebar-item interactive ${activePanel === "home" ? "active" : ""}`}
+                onClick={() => onSelectPanel("home")}
                 title={`Home (${homeName})`}
               >
                 <Home className="sidebar-icon accent-blue" size={16} strokeWidth={1.8} />
@@ -208,8 +203,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
             <li>
               <button
                 type="button"
-                className={`sidebar-item interactive ${currentPath === "virtual://computer" ? "active" : ""}`}
-                onClick={() => onNavigate("virtual://computer")}
+                className={`sidebar-item interactive ${activePanel === "drives" ? "active" : ""}`}
+                onClick={() => onSelectPanel("drives")}
                 title="Drives"
               >
                 <HardDrive className="sidebar-icon muted-gray" size={16} strokeWidth={1.8} />
@@ -219,8 +214,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
             <li>
               <button
                 type="button"
-                className={`sidebar-item interactive ${currentPath === "virtual://network" ? "active" : ""}`}
-                onClick={() => onNavigate("virtual://network")}
+                className={`sidebar-item interactive ${activePanel === "network" ? "active" : ""}`}
+                onClick={() => onSelectPanel("network")}
                 title="Network"
               >
                 <Globe className="sidebar-icon muted-gray" size={16} strokeWidth={1.8} />
