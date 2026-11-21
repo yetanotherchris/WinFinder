@@ -19,6 +19,8 @@ The primary goal is to faithfully replicate the visual polish, typography, icono
 ```text
 WinFinder/
 ├── AGENTS.md                   # This file — conventions and architecture guide
+├── specs/                      # Feature specifications (active specs in specs/, completed in specs/archive/)
+│   └── archive/                # Archived specs for completed features (NNN-short-name.md)
 ├── index.html                  # Vite HTML entry point
 ├── package.json                # Frontend dependencies & scripts
 ├── vite.config.ts              # Vite configuration for Tauri v2
@@ -86,6 +88,40 @@ npm run tauri build
   - macOS accent blue (`#0063E1` / `#0A84FF`) for active selections and sidebar Favorites icons.
   - Antialiased Inter / SF Pro typography at compact macOS sizes (`11px` section headers, `12px`–`13px` labels, `15px` toolbar title).
 - Only use free, permissively licensed icons and fonts (e.g., `lucide-react`, custom SVGs, `@fontsource/inter`).
+
+## Feature Spec Workflow
+
+Every feature request MUST be tracked as a single Markdown spec file in `specs/` using a zero-padded incremental counter (`specs/NNN-short-name.md`, e.g. `specs/015-search-bar.md`).
+
+1. **Before completion (start of feature):** Determine the next available zero-padded number by checking both `specs/` and `specs/archive/`, and create `specs/NNN-short-name.md` using the standard format below.
+2. **After completion:** Amend the spec file if anything changed during or after implementation (check off completed requirements, update `Implementation Notes`, and record changes under `Amendments`).
+3. **Archiving:** Once a feature is completed and finalized, set its status to `Archived` and move the file into `specs/archive/NNN-short-name.md`.
+
+### Standard Spec Format
+
+```markdown
+# NNN — Feature Title
+
+- **Status:** Draft | In Progress | Archived
+- **Date:** YYYY-MM-DD
+- **Request:** "<original user prompt / summary>"
+
+## Summary
+1–2 sentences describing what the feature does and why.
+
+## Requirements
+- [ ] Concrete, testable behavior 1
+- [ ] Concrete, testable behavior 2
+
+## Edge Cases
+- How errors, empty states, virtual views, or platform differences are handled.
+
+## Implementation Notes
+- Key files touched and notable design choices.
+
+## Amendments
+- Any changes made during or after implementation compared to the initial spec (or `None`).
+```
 
 ## Current Scope (Prototype)
 - Frameless Finder-style window with working window controls (close, minimize, maximize, drag).
