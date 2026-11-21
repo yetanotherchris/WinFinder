@@ -29,6 +29,7 @@ interface SidebarProps {
   onResizeWidth: (width: number) => void;
   onSelectPanel: (panel: PanelId) => void;
   onRemoveFavorite: (path: string) => void;
+  useWindowsWindowControls: boolean;
   onWindowClose: () => void;
   onWindowMinimize: () => void;
   onWindowMaximize: () => void;
@@ -45,6 +46,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onResizeWidth,
   onSelectPanel,
   onRemoveFavorite,
+  useWindowsWindowControls,
   onWindowClose,
   onWindowMinimize,
   onWindowMaximize,
@@ -111,56 +113,58 @@ export const Sidebar: React.FC<SidebarProps> = ({
     >
       {/* macOS Traffic Light Window Controls + Drag Strip */}
       <div className="sidebar-window-bar" data-tauri-drag-region>
-        <div className="traffic-lights" role="group" aria-label="Window controls">
-          <button
-            type="button"
-            className="traffic-light traffic-close"
-            onClick={onWindowClose}
-            title="Close"
-            aria-label="Close window"
-          >
-            <svg className="traffic-glyph-svg" width="8" height="8" viewBox="0 0 8 8" aria-hidden="true">
-              <path
-                d="M2 2L6 6M6 2L2 6"
-                stroke="currentColor"
-                strokeWidth="1.25"
-                strokeLinecap="round"
-              />
-            </svg>
-          </button>
-          <button
-            type="button"
-            className="traffic-light traffic-minimize"
-            onClick={onWindowMinimize}
-            title="Minimize"
-            aria-label="Minimize window"
-          >
-            <svg className="traffic-glyph-svg" width="8" height="8" viewBox="0 0 8 8" aria-hidden="true">
-              <path
-                d="M1.75 4H6.25"
-                stroke="currentColor"
-                strokeWidth="1.25"
-                strokeLinecap="round"
-              />
-            </svg>
-          </button>
-          <button
-            type="button"
-            className="traffic-light traffic-maximize"
-            onClick={onWindowMaximize}
-            title="Maximize"
-            aria-label="Maximize window"
-          >
-            <svg className="traffic-glyph-svg" width="8" height="8" viewBox="0 0 8 8" aria-hidden="true">
-              <path
-                d="M4 1.75V6.25M1.75 4H6.25"
-                stroke="currentColor"
-                strokeWidth="1.25"
-                strokeLinecap="round"
-              />
-            </svg>
-          </button>
-        </div>
+        {!useWindowsWindowControls && (
+          <div className="traffic-lights" role="group" aria-label="Window controls">
+            <button
+              type="button"
+              className="traffic-light traffic-close"
+              onClick={onWindowClose}
+              title="Close"
+              aria-label="Close window"
+            >
+              <svg className="traffic-glyph-svg" width="8" height="8" viewBox="0 0 8 8" aria-hidden="true">
+                <path
+                  d="M2 2L6 6M6 2L2 6"
+                  stroke="currentColor"
+                  strokeWidth="1.25"
+                  strokeLinecap="round"
+                />
+              </svg>
+            </button>
+            <button
+              type="button"
+              className="traffic-light traffic-minimize"
+              onClick={onWindowMinimize}
+              title="Minimize"
+              aria-label="Minimize window"
+            >
+              <svg className="traffic-glyph-svg" width="8" height="8" viewBox="0 0 8 8" aria-hidden="true">
+                <path
+                  d="M1.75 4H6.25"
+                  stroke="currentColor"
+                  strokeWidth="1.25"
+                  strokeLinecap="round"
+                />
+              </svg>
+            </button>
+            <button
+              type="button"
+              className="traffic-light traffic-maximize"
+              onClick={onWindowMaximize}
+              title="Maximize"
+              aria-label="Maximize window"
+            >
+              <svg className="traffic-glyph-svg" width="8" height="8" viewBox="0 0 8 8" aria-hidden="true">
+                <path
+                  d="M4 1.75V6.25M1.75 4H6.25"
+                  stroke="currentColor"
+                  strokeWidth="1.25"
+                  strokeLinecap="round"
+                />
+              </svg>
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Scrollable Sidebar Sections */}

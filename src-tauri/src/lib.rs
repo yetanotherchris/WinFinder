@@ -104,6 +104,12 @@ impl Default for PanelState {
     }
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AppSettings {
+    pub use_windows_window_controls: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct PersistedAppState {
@@ -111,6 +117,7 @@ pub struct PersistedAppState {
     pub active_panel: String,
     pub panels: BTreeMap<String, PanelState>,
     pub custom_favorites: Vec<FavoriteFolder>,
+    pub settings: AppSettings,
 }
 
 impl Default for PersistedAppState {
@@ -120,6 +127,7 @@ impl Default for PersistedAppState {
             active_panel: "home".to_string(),
             panels: BTreeMap::new(),
             custom_favorites: Vec::new(),
+            settings: AppSettings::default(),
         }
     }
 }
@@ -294,6 +302,13 @@ impl AppStateStore {
         let mut guard = self.state.lock().unwrap();
         guard.custom_favorites = favorites;
         guard.sanitize();
+        drop(guard);
+        self.save_now();
+    }
+
+    fn update_settings(&self, settings: AppSettings) {
+        let mut guard = self.state.lock().unwrap();
+        guard.settings = settings;
         drop(guard);
         self.save_now();
     }
@@ -1858,6 +1873,14 @@ fn save_custom_favorites(
 }
 
 #[tauri::command]
+fn save_settings(
+    settings: AppSettings,
+    store: tauri::State<'_, Arc<AppStateStore>>,
+) {
+    store.update_settings(settings);
+}
+
+#[tauri::command]
 fn check_directory_exists(path: String) -> bool {
     let trimmed = path.trim();
     if trimmed.is_empty() || trimmed.starts_with("virtual://") {
@@ -1999,6 +2022,7 @@ pub fn run() {
             save_panel_states,
             resolve_panel_path,
             save_custom_favorites,
+            save_settings,
             check_directory_exists,
             validate_favorite_dirs,
             empty_trash
@@ -2010,6 +2034,23 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn persisted_app_state_defaults_settings_when_missing() {
+        let legacy_json = r#"{"activePanel":"home","panels":{}}"#;
+        let state: PersistedAppState = serde_json::from_str(legacy_json).unwrap();
+        assert!(!state.settings.use_windows_window_controls);
+    }
+
+    #[test]
+    fn persisted_app_state_roundtrips_settings() {
+        let mut state = PersistedAppState::default();
+        state.settings.use_windows_window_controls = true;
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(json.contains("useWindowsWindowControls"));
+        let decoded: PersistedAppState = serde_json::from_str(&json).unwrap();
+        assert!(decoded.settings.use_windows_window_controls);
+    }
 
     #[cfg(target_os = "windows")]
     #[test]

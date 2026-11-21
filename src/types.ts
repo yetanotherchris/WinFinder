@@ -79,8 +79,13 @@ export interface PanelState {
   columnPaths: string[];
 }
 
+export interface AppSettings {
+  useWindowsWindowControls: boolean;
+}
+
 export interface PersistedAppState {
   activePanel: TrackedPanelId;
   panels: Partial<Record<TrackedPanelId, PanelState>>;
   customFavorites?: FavoriteFolder[];
+  settings?: AppSettings;
 }
