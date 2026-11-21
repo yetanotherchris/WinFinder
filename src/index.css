@@ -363,6 +363,52 @@ body.is-dragging-folder-blocked * {
   gap: 12px;
 }
 
+.finder-toolbar.has-win-controls {
+  padding-right: 0;
+}
+
+.win-window-controls {
+  display: flex;
+  align-items: stretch;
+  align-self: stretch;
+  flex-shrink: 0;
+  margin-left: 4px;
+  border-left: 1px solid var(--border-subtle);
+}
+
+.win-caption-btn {
+  width: 46px;
+  height: 100%;
+  border: none;
+  background: transparent;
+  color: #3a3a3e;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  cursor: default;
+  transition: background-color 0.1s ease, color 0.1s ease;
+}
+
+.win-caption-btn:hover {
+  background: rgba(0, 0, 0, 0.06);
+  color: var(--text-primary);
+}
+
+.win-caption-btn:active {
+  background: rgba(0, 0, 0, 0.1);
+}
+
+.win-caption-close:hover {
+  background: #c42b1c;
+  color: #ffffff;
+}
+
+.win-caption-close:active {
+  background: #b02518;
+  color: #ffffff;
+}
+
 .toolbar-left {
   display: flex;
   align-items: center;
@@ -572,6 +618,16 @@ body.is-dragging-folder-blocked * {
   height: 1px;
   background: rgba(0, 0, 0, 0.08);
   margin: 4px 6px;
+}
+
+.sort-menu-shortcut {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.sort-menu-item:hover:not(:disabled) .sort-menu-shortcut {
+  color: rgba(255, 255, 255, 0.82);
 }
 
 /* ==================== MAIN VIEW ==================== */
@@ -1594,6 +1650,165 @@ body.is-dragging-folder-blocked * {
 
 .finder-dialog-btn-primary:active {
   filter: brightness(0.94);
+}
+
+/* ==================== SETTINGS DIALOG ==================== */
+.settings-dialog {
+  width: 440px;
+  max-width: 100%;
+  background: #f5f5f7;
+  border: 1px solid rgba(0, 0, 0, 0.14);
+  border-radius: 12px;
+  box-shadow: 0 20px 48px rgba(0, 0, 0, 0.24), 0 2px 6px rgba(0, 0, 0, 0.08);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.settings-dialog-header {
+  height: 44px;
+  padding: 0 14px 0 18px;
+  background: rgba(250, 250, 252, 0.96);
+  border-bottom: 1px solid var(--border-hairline);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.settings-dialog-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
+}
+
+.settings-close-btn {
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: default;
+  transition: background-color 0.1s ease, color 0.1s ease;
+}
+
+.settings-close-btn:hover {
+  background: rgba(0, 0, 0, 0.06);
+  color: var(--text-primary);
+}
+
+.settings-dialog-body {
+  padding: 16px 18px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.settings-section-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 0 4px;
+}
+
+.settings-group {
+  background: #ffffff;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.settings-row {
+  padding: 12px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.settings-row-text {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.settings-row-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.settings-row-desc {
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+}
+
+.macos-switch {
+  position: relative;
+  width: 38px;
+  height: 22px;
+  border-radius: 999px;
+  border: none;
+  padding: 2px;
+  background: #d1d1d6;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  cursor: default;
+  transition: background-color 0.16s ease;
+}
+
+.macos-switch.is-on {
+  background: var(--accent-blue);
+}
+
+.macos-switch:focus-visible {
+  outline: 2px solid var(--accent-blue);
+  outline-offset: 2px;
+}
+
+.macos-switch-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.22), 0 0.5px 1px rgba(0, 0, 0, 0.1);
+  transform: translateX(0);
+  transition: transform 0.16s ease;
+}
+
+.macos-switch.is-on .macos-switch-thumb {
+  transform: translateX(16px);
+}
+
+.settings-dialog-footer {
+  padding: 10px 18px 14px;
+  border-top: 1px solid var(--border-subtle);
+  background: rgba(250, 250, 252, 0.85);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.settings-storage-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.settings-done-btn {
+  flex: 0 0 auto;
+  min-width: 72px;
 }
 
 /* ==================== TOOLBAR SEARCH INPUT ==================== */
