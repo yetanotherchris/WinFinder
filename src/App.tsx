@@ -225,8 +225,6 @@ export const App: React.FC = () => {
   const dragCleanupRef = useRef<(() => void) | null>(null);
   const locationsRef = useRef<SidebarLocations | null>(locations);
   locationsRef.current = locations;
-  const listingRef = useRef<DirectoryListing | null>(listing);
-  listingRef.current = listing;
   const customFavoritesRef = useRef<FavoriteFolder[]>(customFavorites);
   customFavoritesRef.current = customFavorites;
   const showHiddenRef = useRef(showHidden);
