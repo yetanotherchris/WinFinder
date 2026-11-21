@@ -640,7 +640,9 @@ mod win_shell {
     use windows::Foundation::TypedEventHandler;
     use windows::Storage::{IStorageItem, StorageFile};
     use windows::core::{Interface, HSTRING, PCSTR, PCWSTR, PWSTR};
-    use windows::Win32::Foundation::{GlobalFree, HANDLE, HWND, LPARAM, POINT, SIZE, WPARAM};
+    use windows::Win32::Foundation::{
+        E_UNEXPECTED, GlobalFree, HANDLE, HWND, LPARAM, POINT, SIZE, WPARAM,
+    };
     use windows::Win32::Graphics::Gdi::{
         CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits, GetObjectW, BITMAP, BITMAPINFO,
         BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP,
@@ -657,12 +659,13 @@ mod win_shell {
     };
     use windows::Win32::System::Ole::CF_HDROP;
     use windows::Win32::UI::Shell::{
-        BHID_EnumItems, BHID_SFUIObject, FOLDERID_AppsFolder, IContextMenu,
-        IDataTransferManagerInterop, IEnumShellItems, IShellItem, IShellItemImageFactory,
-        SHCreateItemFromParsingName, SHCreateItemFromRelativeName, SHGetKnownFolderItem,
-        CMF_EXPLORE, CMF_NORMAL, CMIC_MASK_PTINVOKE, CMINVOKECOMMANDINFO, CMINVOKECOMMANDINFOEX,
-        DROPFILES, KF_FLAG_DEFAULT, SEE_MASK_UNICODE, SIGDN_NORMALDISPLAY,
-        SIGDN_PARENTRELATIVEPARSING, SIIGBF_BIGGERSIZEOK, SIIGBF_ICONONLY,
+        BHID_EnumItems, BHID_SFUIObject, FOLDERID_AppsFolder, FOLDERID_RecycleBinFolder,
+        IContextMenu, IDataTransferManagerInterop, IEnumShellItems, IShellItem,
+        IShellItemImageFactory, SHCreateItemFromParsingName, SHCreateItemFromRelativeName,
+        SHEmptyRecycleBinW, SHGetKnownFolderItem, CMF_EXPLORE, CMF_NORMAL, CMIC_MASK_PTINVOKE,
+        CMINVOKECOMMANDINFO, CMINVOKECOMMANDINFOEX, DROPFILES, KF_FLAG_DEFAULT, SEE_MASK_UNICODE,
+        SHERB_NOCONFIRMATION, SHERB_NOPROGRESSUI, SIGDN_DESKTOPABSOLUTEPARSING, SIGDN_FILESYSPATH,
+        SIGDN_NORMALDISPLAY, SIGDN_PARENTRELATIVEPARSING, SIIGBF_BIGGERSIZEOK, SIIGBF_ICONONLY,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         CreatePopupMenu, DestroyMenu, GetCursorPos, PostMessageW, SetForegroundWindow,
@@ -1176,6 +1179,134 @@ mod win_shell {
 
         Ok(())
     }
+
+    pub fn enumerate_recycle_bin() -> Result<Vec<FileEntry>, String> {
+        use std::path::Path;
+        use std::time::UNIX_EPOCH;
+
+        unsafe {
+            let co_hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            let should_uninit = co_hr.is_ok();
+
+            let result = (|| -> Result<Vec<FileEntry>, String> {
+                let recycle_bin: IShellItem =
+                    SHGetKnownFolderItem(&FOLDERID_RecycleBinFolder, KF_FLAG_DEFAULT, None)
+                        .map_err(|e| format!("Could not open Windows Recycle Bin: {}", e))?;
+
+                let enum_items: IEnumShellItems = recycle_bin
+                    .BindToHandler(None, &BHID_EnumItems)
+                    .map_err(|e| format!("Could not enumerate Recycle Bin items: {}", e))?;
+
+                let mut entries = Vec::new();
+                let mut index = 0usize;
+
+                loop {
+                    let mut batch: [Option<IShellItem>; 32] = Default::default();
+                    let mut fetched = 0u32;
+                    let hr = enum_items.Next(&mut batch, Some(&mut fetched));
+                    if fetched == 0 {
+                        break;
+                    }
+
+                    for item in batch.into_iter().take(fetched as usize).flatten() {
+                        index += 1;
+                        let name = item
+                            .GetDisplayName(SIGDN_NORMALDISPLAY)
+                            .ok()
+                            .and_then(|p| pwstr_to_string(p))
+                            .filter(|s| !s.trim().is_empty());
+
+                        let fs_path = item
+                            .GetDisplayName(SIGDN_FILESYSPATH)
+                            .ok()
+                            .and_then(|p| pwstr_to_string(p));
+
+                        let parsing_path = fs_path.clone().or_else(|| {
+                            item.GetDisplayName(SIGDN_DESKTOPABSOLUTEPARSING)
+                                .ok()
+                                .and_then(|p| pwstr_to_string(p))
+                        });
+
+                        let path = parsing_path.unwrap_or_else(|| format!("trash://item-{}", index));
+                        let display_name = name.unwrap_or_else(|| {
+                            Path::new(&path)
+                                .file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| format!("Item {}", index))
+                        });
+
+                        let meta = fs_path.as_deref().and_then(|p| std::fs::metadata(p).ok());
+                        let is_dir = meta.as_ref().map(|m| m.is_dir()).unwrap_or(false);
+                        let size = if is_dir {
+                            0
+                        } else {
+                            meta.as_ref().map(|m| m.len()).unwrap_or(0)
+                        };
+                        let modified_ms = meta.as_ref().and_then(|m| {
+                            m.modified()
+                                .ok()
+                                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                                .map(|d| d.as_millis() as u64)
+                        });
+                        let extension = if is_dir {
+                            None
+                        } else {
+                            Path::new(&display_name)
+                                .extension()
+                                .map(|e| e.to_string_lossy().to_lowercase())
+                        };
+
+                        entries.push(FileEntry {
+                            name: display_name,
+                            path,
+                            is_dir,
+                            entry_kind: if is_dir {
+                                "folder".to_string()
+                            } else {
+                                "file".to_string()
+                            },
+                            extension,
+                            size,
+                            modified_ms,
+                            icon_data_url: None,
+                        });
+                    }
+
+                    if hr.is_err() || fetched < 32 {
+                        break;
+                    }
+                }
+
+                entries.sort_by(|a, b| {
+                    b.is_dir
+                        .cmp(&a.is_dir)
+                        .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+                });
+                Ok(entries)
+            })();
+
+            if should_uninit {
+                CoUninitialize();
+            }
+
+            result
+        }
+    }
+
+    pub fn empty_recycle_bin() -> Result<(), String> {
+        unsafe {
+            let res = SHEmptyRecycleBinW(
+                None,
+                PCWSTR::null(),
+                SHERB_NOCONFIRMATION | SHERB_NOPROGRESSUI,
+            );
+            match res {
+                Ok(()) => Ok(()),
+                Err(e) if e.code() == E_UNEXPECTED => Ok(()),
+                Err(e) => Err(format!("Failed to empty Recycle Bin: {}", e)),
+            }
+        }
+    }
 }
 
 fn load_applications_entries() -> Result<Vec<FileEntry>, String> {
@@ -1270,6 +1401,66 @@ fn list_network() -> Result<DirectoryListing, String> {
     })
 }
 
+fn list_trash(show_hidden: bool) -> Result<DirectoryListing, String> {
+    let (_home, home_path, home_name) = home_info()?;
+
+    #[cfg(target_os = "windows")]
+    let entries = {
+        let _ = show_hidden;
+        win_shell::enumerate_recycle_bin()?
+    };
+
+    #[cfg(target_os = "macos")]
+    let entries = {
+        let trash_dir = dirs::home_dir().map(|h| h.join(".Trash"));
+        match trash_dir {
+            Some(dir) if dir.is_dir() => list_fs_directory(&dir, show_hidden)?.entries,
+            _ => Vec::new(),
+        }
+    };
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let entries = {
+        let trash_files = dirs::data_local_dir().map(|d| d.join("Trash").join("files"));
+        match trash_files {
+            Some(dir) if dir.is_dir() => list_fs_directory(&dir, show_hidden)?.entries,
+            _ => Vec::new(),
+        }
+    };
+
+    Ok(DirectoryListing {
+        current_path: "virtual://trash".to_string(),
+        current_name: "Trash".to_string(),
+        home_path,
+        home_name,
+        breadcrumbs: vec![BreadcrumbItem {
+            name: "Trash".to_string(),
+            path: "virtual://trash".to_string(),
+        }],
+        entries,
+        empty_message: Some("Trash is empty".to_string()),
+    })
+}
+
+#[cfg(not(target_os = "windows"))]
+fn clear_dir_contents(dir: &Path) -> Result<(), String> {
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    let read_dir = fs::read_dir(dir).map_err(|e| format!("Unable to access Trash: {}", e))?;
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            fs::remove_dir_all(&path)
+                .map_err(|e| format!("Failed to remove trashed folder: {}", e))?;
+        } else {
+            fs::remove_file(&path)
+                .map_err(|e| format!("Failed to remove trashed file: {}", e))?;
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn get_home_dir() -> Result<String, String> {
     let (_, home_path, _) = home_info()?;
@@ -1307,6 +1498,7 @@ async fn list_directory(
         "virtual://applications" => list_applications(&cache),
         "virtual://computer" => list_computer(),
         "virtual://network" => list_network(),
+        "virtual://trash" => list_trash(include_hidden),
         raw => list_fs_directory(Path::new(raw), include_hidden),
     })
     .await
@@ -1591,6 +1783,35 @@ fn resolve_panel_path(saved_path: Option<String>, root_path: String) -> String {
     resolve_existing_dir(saved_path.as_deref(), &root_path)
 }
 
+#[tauri::command]
+async fn empty_trash() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        #[cfg(target_os = "windows")]
+        {
+            win_shell::empty_recycle_bin()
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(trash_dir) = dirs::home_dir().map(|h| h.join(".Trash")) {
+                clear_dir_contents(&trash_dir)?;
+            }
+            Ok(())
+        }
+
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        {
+            if let Some(base) = dirs::data_local_dir().map(|d| d.join("Trash")) {
+                clear_dir_contents(&base.join("files"))?;
+                clear_dir_contents(&base.join("info"))?;
+            }
+            Ok(())
+        }
+    })
+    .await
+    .map_err(|e| format!("Failed to empty Trash: {}", e))?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let apps_cache = AppsCache::new();
@@ -1668,7 +1889,8 @@ pub fn run() {
             share_with_os,
             load_app_state,
             save_panel_states,
-            resolve_panel_path
+            resolve_panel_path,
+            empty_trash
         ])
         .run(tauri::generate_context!())
         .expect("error while running WinFinder");
