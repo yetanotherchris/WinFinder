@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
 use tauri::Manager;
@@ -379,21 +380,31 @@ fn is_rect_visible_on_monitors(
     })
 }
 
+fn clamped_window_dimensions(state: &WindowState) -> (u32, u32) {
+    (state.width.max(700), state.height.max(420))
+}
+
 fn restore_window_state(window: &tauri::WebviewWindow, state: &WindowState) {
-    let width = state.width.max(700);
-    let height = state.height.max(420);
+    let (width, height) = clamped_window_dimensions(state);
+
+    let positioned = match (state.x, state.y) {
+        (Some(x), Some(y)) if is_rect_visible_on_monitors(window, x, y, width, height) => {
+            // Move to the target monitor before sizing so cross-DPI WM_DPICHANGED
+            // does not rescale the saved physical dimensions.
+            let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
+                x, y,
+            )));
+            true
+        }
+        _ => false,
+    };
+
     let _ = window.set_size(tauri::Size::Physical(tauri::PhysicalSize::new(
         width, height,
     )));
 
-    if let (Some(x), Some(y)) = (state.x, state.y) {
-        if is_rect_visible_on_monitors(window, x, y, width, height) {
-            let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
-                x, y,
-            )));
-        } else {
-            let _ = window.center();
-        }
+    if !positioned {
+        let _ = window.center();
     }
 
     if state.maximized {
@@ -1981,27 +1992,36 @@ pub fn run() {
     let apps_cache = AppsCache::new();
     apps_cache.start_preload();
     let state_store = AppStateStore::load();
+    let window_ready = Arc::new(AtomicBool::new(false));
+    let window_ready_for_setup = Arc::clone(&window_ready);
+    let window_ready_for_events = Arc::clone(&window_ready);
 
     tauri::Builder::default()
         .manage(apps_cache)
         .manage(Arc::clone(&state_store))
-        .setup(|app| {
+        .setup(move |app| {
             if let Some(window) = app.get_webview_window("main") {
                 let store = app.state::<Arc<AppStateStore>>();
                 let snapshot = store.snapshot();
                 if let Some(win_state) = &snapshot.window {
                     restore_window_state(&window, win_state);
                 }
+                let _ = window.show();
+                let _ = window.set_focus();
             }
+            window_ready_for_setup.store(true, Ordering::Release);
             Ok(())
         })
-        .on_window_event(|window, event| {
+        .on_window_event(move |window, event| {
             if window.label() != "main" {
                 return;
             }
             let store = window.state::<Arc<AppStateStore>>();
             match event {
                 tauri::WindowEvent::Resized(size) => {
+                    if !window_ready_for_events.load(Ordering::Acquire) {
+                        return;
+                    }
                     if size.width == 0 || size.height == 0 {
                         return;
                     }
@@ -2012,6 +2032,9 @@ pub fn run() {
                     store.update_window_size(size.width, size.height, maximized);
                 }
                 tauri::WindowEvent::Moved(pos) => {
+                    if !window_ready_for_events.load(Ordering::Acquire) {
+                        return;
+                    }
                     if window.is_minimized().unwrap_or(false) {
                         return;
                     }
@@ -2066,6 +2089,27 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clamped_window_dimensions_enforces_minimums() {
+        let too_small = WindowState {
+            width: 300,
+            height: 200,
+            x: Some(100),
+            y: Some(100),
+            maximized: false,
+        };
+        assert_eq!(clamped_window_dimensions(&too_small), (700, 420));
+
+        let normal = WindowState {
+            width: 1440,
+            height: 900,
+            x: Some(50),
+            y: Some(60),
+            maximized: true,
+        };
+        assert_eq!(clamped_window_dimensions(&normal), (1440, 900));
+    }
 
     #[cfg(target_os = "windows")]
     #[test]
