@@ -21,7 +21,6 @@ import type {
   SortField,
   ViewMode,
 } from "../types";
-import { FAVORITE_DRAG_MIME } from "../utils/favorites";
 import {
   formatDateModified,
   formatFileSize,
@@ -59,7 +58,7 @@ interface MainViewProps {
   onChangeSort: (next: SortConfig) => void;
   onExpandedPathsChange: (paths: string[]) => void;
   onColumnPathsChange: (paths: string[]) => void;
-  onDragFolderChange?: (folder: FavoriteFolder | null) => void;
+  onStartFolderDrag?: (folder: FavoriteFolder, e: React.PointerEvent) => void;
   isTrashView?: boolean;
   emptyingTrash?: boolean;
   onEmptyTrash?: () => void;
@@ -133,7 +132,7 @@ export const MainView: React.FC<MainViewProps> = ({
   onChangeSort,
   onExpandedPathsChange,
   onColumnPathsChange,
-  onDragFolderChange,
+  onStartFolderDrag,
   isTrashView = false,
   emptyingTrash = false,
   onEmptyTrash,
@@ -157,20 +156,16 @@ export const MainView: React.FC<MainViewProps> = ({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [confirmEmptyOpen]);
 
+  const isDraggableFavoriteFolder = (entry: FileEntry): boolean =>
+    !isTrashView && entry.isDir && !entry.path.startsWith("virtual://");
+
   const getFolderDragProps = (entry: FileEntry) => {
-    const canDrag = !isTrashView && entry.isDir && !entry.path.startsWith("virtual://");
-    if (!canDrag) return {};
+    if (!isDraggableFavoriteFolder(entry)) return {};
     return {
-      draggable: true,
-      onDragStart: (e: React.DragEvent) => {
-        const payload: FavoriteFolder = { name: entry.name, path: entry.path };
-        e.dataTransfer.effectAllowed = "link";
-        e.dataTransfer.setData(FAVORITE_DRAG_MIME, JSON.stringify(payload));
-        e.dataTransfer.setData("text/plain", entry.path);
-        onDragFolderChange?.(payload);
-      },
-      onDragEnd: () => {
-        onDragFolderChange?.(null);
+      onPointerDown: (e: React.PointerEvent) => {
+        if (e.button !== 0) return;
+        if ((e.target as HTMLElement | null)?.closest(".list-disclosure-btn")) return;
+        onStartFolderDrag?.({ name: entry.name, path: entry.path }, e);
       },
     };
   };

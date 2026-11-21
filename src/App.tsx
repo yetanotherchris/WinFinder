@@ -6,6 +6,7 @@ import { AlertTriangle } from "lucide-react";
 import { Sidebar } from "./components/Sidebar";
 import { Toolbar } from "./components/Toolbar";
 import { MainView } from "./components/MainView";
+import { FileIcon } from "./components/FileIcon";
 import {
   getCachedDirectory,
   invalidateCachedDirectory,
@@ -17,6 +18,7 @@ import {
   isPathInFavorites,
   MAX_FAVORITES_ITEMS,
   normalizePathKey,
+  type FavoriteDropState,
 } from "./utils/favorites";
 import type {
   DirectoryListing,
@@ -101,6 +103,15 @@ function loadBrowserCustomFavorites(): FavoriteFolder[] {
   }
 }
 
+interface InAppFolderDrag {
+  folder: FavoriteFolder;
+  clientX: number;
+  clientY: number;
+  dropState: FavoriteDropState;
+}
+
+const FOLDER_DRAG_THRESHOLD_PX = 6;
+
 interface HistoryEntry {
   path: string;
   panel: PanelId;
@@ -161,7 +172,7 @@ export const App: React.FC = () => {
   const [expandedPaths, setExpandedPaths] = useState<string[]>([]);
   const [columnPaths, setColumnPaths] = useState<string[]>([]);
   const [customFavorites, setCustomFavorites] = useState<FavoriteFolder[]>([]);
-  const [draggingFolder, setDraggingFolder] = useState<FavoriteFolder | null>(null);
+  const [inAppDrag, setInAppDrag] = useState<InAppFolderDrag | null>(null);
   const [osDragOverFavorites, setOsDragOverFavorites] = useState<boolean>(false);
   const [missingFavorite, setMissingFavorite] = useState<FavoriteFolder | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
@@ -192,6 +203,7 @@ export const App: React.FC = () => {
   const requestIdRef = useRef(0);
   const loadingTimerRef = useRef<number | null>(null);
   const favoritesSectionRef = useRef<HTMLDivElement | null>(null);
+  const dragCleanupRef = useRef<(() => void) | null>(null);
   const locationsRef = useRef<SidebarLocations | null>(locations);
   locationsRef.current = locations;
   const customFavoritesRef = useRef<FavoriteFolder[]>(customFavorites);
@@ -286,6 +298,134 @@ export const App: React.FC = () => {
     },
     [persistCustomFavorites]
   );
+
+  // Pointer-event-based in-app folder drag-and-drop into Favorites (WebView2 compatible)
+  const handleStartFolderDrag = useCallback(
+    (folder: FavoriteFolder, downEvent: React.PointerEvent) => {
+      dragCleanupRef.current?.();
+
+      const startX = downEvent.clientX;
+      const startY = downEvent.clientY;
+      const pointerId = downEvent.pointerId;
+      let dragging = false;
+
+      const evaluatePoint = (clientX: number, clientY: number): FavoriteDropState => {
+        const el = favoritesSectionRef.current;
+        if (!el) return "none";
+        const rect = el.getBoundingClientRect();
+        const inside =
+          clientX >= rect.left &&
+          clientX <= rect.right &&
+          clientY >= rect.top &&
+          clientY <= rect.bottom;
+        if (!inside) return "none";
+
+        const locs = locationsRef.current;
+        const current = customFavoritesRef.current;
+        if (isPathInFavorites(folder.path, locs, current)) {
+          return "duplicate";
+        }
+        if (countBuiltInFavorites(locs) + current.length >= MAX_FAVORITES_ITEMS) {
+          return "full";
+        }
+        return "accept";
+      };
+
+      const setBodyDragClasses = (dropState: FavoriteDropState | null) => {
+        document.body.classList.remove(
+          "is-dragging-folder",
+          "is-dragging-folder-accept",
+          "is-dragging-folder-blocked"
+        );
+        if (dropState === null) return;
+        document.body.classList.add("is-dragging-folder");
+        if (dropState === "accept") {
+          document.body.classList.add("is-dragging-folder-accept");
+        } else if (dropState === "duplicate" || dropState === "full") {
+          document.body.classList.add("is-dragging-folder-blocked");
+        }
+      };
+
+      const cleanup = () => {
+        window.removeEventListener("pointermove", onPointerMove);
+        window.removeEventListener("pointerup", onPointerUp);
+        window.removeEventListener("pointercancel", onCancel);
+        window.removeEventListener("blur", onCancel);
+        window.removeEventListener("keydown", onKeyDown, true);
+        setBodyDragClasses(null);
+        setInAppDrag(null);
+        dragCleanupRef.current = null;
+      };
+
+      const onPointerMove = (moveEvent: PointerEvent) => {
+        if (moveEvent.pointerId !== pointerId) return;
+        if (!dragging) {
+          const dx = moveEvent.clientX - startX;
+          const dy = moveEvent.clientY - startY;
+          if (Math.hypot(dx, dy) < FOLDER_DRAG_THRESHOLD_PX) return;
+          dragging = true;
+        }
+        const dropState = evaluatePoint(moveEvent.clientX, moveEvent.clientY);
+        setBodyDragClasses(dropState);
+        setInAppDrag({
+          folder,
+          clientX: moveEvent.clientX,
+          clientY: moveEvent.clientY,
+          dropState,
+        });
+      };
+
+      const onPointerUp = (upEvent: PointerEvent) => {
+        if (upEvent.pointerId !== pointerId) return;
+        const wasDragging = dragging;
+        const finalDropState = wasDragging
+          ? evaluatePoint(upEvent.clientX, upEvent.clientY)
+          : "none";
+        cleanup();
+
+        if (wasDragging) {
+          const suppressClick = (clickEvent: MouseEvent) => {
+            clickEvent.preventDefault();
+            clickEvent.stopPropagation();
+          };
+          window.addEventListener("click", suppressClick, { capture: true, once: true });
+          window.setTimeout(() => {
+            window.removeEventListener("click", suppressClick, true);
+          }, 0);
+
+          if (finalDropState === "accept") {
+            handleAddFavorites([folder]);
+          }
+        }
+      };
+
+      const onCancel = () => {
+        cleanup();
+      };
+
+      const onKeyDown = (keyEvent: KeyboardEvent) => {
+        if (keyEvent.key === "Escape" && dragging) {
+          keyEvent.preventDefault();
+          keyEvent.stopPropagation();
+          cleanup();
+        }
+      };
+
+      window.addEventListener("pointermove", onPointerMove);
+      window.addEventListener("pointerup", onPointerUp);
+      window.addEventListener("pointercancel", onCancel);
+      window.addEventListener("blur", onCancel);
+      window.addEventListener("keydown", onKeyDown, true);
+      dragCleanupRef.current = cleanup;
+    },
+    [handleAddFavorites]
+  );
+
+  useEffect(() => {
+    return () => {
+      dragCleanupRef.current?.();
+    };
+  }, []);
 
   const updateTrackedPanelState = useCallback(
     (
@@ -1122,13 +1262,12 @@ export const App: React.FC = () => {
         locations={locations}
         activePanel={activePanel}
         customFavorites={customFavorites}
-        draggingFolder={draggingFolder}
+        inAppDropState={inAppDrag?.dropState ?? "none"}
         osDragOverFavorites={osDragOverFavorites}
         favoritesSectionRef={favoritesSectionRef}
         width={sidebarWidth}
         onResizeWidth={setSidebarWidth}
         onSelectPanel={(panel) => void handleSelectPanel(panel)}
-        onAddFavorites={handleAddFavorites}
         onRemoveFavorite={handleRemoveFavorite}
         onWindowClose={handleWindowClose}
         onWindowMinimize={handleWindowMinimize}
@@ -1186,12 +1325,41 @@ export const App: React.FC = () => {
           onChangeSort={handleChangeSort}
           onExpandedPathsChange={handleExpandedPathsChange}
           onColumnPathsChange={handleColumnPathsChange}
-          onDragFolderChange={setDraggingFolder}
+          onStartFolderDrag={handleStartFolderDrag}
           isTrashView={activePath === "virtual://trash"}
           emptyingTrash={emptyingTrash}
           onEmptyTrash={() => void handleEmptyTrash()}
         />
       </div>
+
+      {inAppDrag && (
+        <div
+          className={`folder-drag-ghost ${
+            inAppDrag.dropState === "accept"
+              ? "is-accept"
+              : inAppDrag.dropState === "duplicate" || inAppDrag.dropState === "full"
+                ? "is-blocked"
+                : ""
+          }`}
+          style={{
+            transform: `translate3d(${inAppDrag.clientX + 14}px, ${inAppDrag.clientY + 12}px, 0)`,
+          }}
+          aria-hidden="true"
+        >
+          <FileIcon
+            name={inAppDrag.folder.name}
+            isDir
+            entryKind="folder"
+            extension={null}
+            iconDataUrl={null}
+            size={18}
+          />
+          <span className="folder-drag-ghost-label">{inAppDrag.folder.name}</span>
+          {inAppDrag.dropState === "accept" && (
+            <span className="folder-drag-ghost-badge">+</span>
+          )}
+        </div>
+      )}
 
       {missingFavorite && (
         <div

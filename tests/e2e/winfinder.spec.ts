@@ -328,6 +328,63 @@ test.describe("WinFinder E2E Test Scenarios", () => {
 
       expect(wasPrevented).toBe(true);
     });
+
+    test("S10 — Pointer Drag & Drop Folder into Favorites", async ({ page }) => {
+      // Navigate into Documents so "Projects" is a non-built-in folder
+      await page.locator(".icon-tile", { hasText: "Documents" }).dblclick();
+      await expect(page.locator(".toolbar-title")).toHaveText("Documents");
+
+      const projectsTile = page.locator(".icon-tile", { hasText: "Projects" });
+      const favSection = page.locator(".sidebar-favorites-section");
+      const tileBox = await projectsTile.boundingBox();
+      const favBox = await favSection.boundingBox();
+      expect(tileBox).not.toBeNull();
+      expect(favBox).not.toBeNull();
+
+      const startX = tileBox!.x + tileBox!.width / 2;
+      const startY = tileBox!.y + tileBox!.height / 2;
+      const dropX = favBox!.x + favBox!.width / 2;
+      const dropY = favBox!.y + favBox!.height / 2;
+
+      // 1. Drag Projects over Favorites -> ghost & accept state appear, drop adds it
+      await page.mouse.move(startX, startY);
+      await page.mouse.down();
+      await page.mouse.move(dropX, dropY, { steps: 6 });
+
+      await expect(page.locator(".folder-drag-ghost")).toBeVisible();
+      await expect(page.locator(".folder-drag-ghost")).toContainText("Projects");
+      await expect(favSection).toHaveClass(/favorites-drop-accept/);
+      await expect(page.locator(".favorites-drop-indicator")).toBeVisible();
+
+      await page.mouse.up();
+
+      await expect(page.locator(".folder-drag-ghost")).toBeHidden();
+      const projectsFav = favSection.locator("button.sidebar-item", {
+        hasText: "Projects",
+      });
+      await expect(projectsFav).toBeVisible();
+
+      // 2. Dragging Projects again shows duplicate blocked feedback and does not duplicate
+      await page.mouse.move(startX, startY);
+      await page.mouse.down();
+      await page.mouse.move(dropX, dropY, { steps: 6 });
+
+      await expect(favSection).toHaveClass(/favorites-drop-blocked/);
+      await expect(page.locator(".favorites-drop-hint")).toHaveText(
+        "Already in Favorites"
+      );
+
+      // Escape cancels drag cleanly
+      await page.keyboard.press("Escape");
+      await expect(page.locator(".folder-drag-ghost")).toBeHidden();
+      await page.mouse.up();
+      await expect(projectsFav).toHaveCount(1);
+
+      // 3. Clicking the new custom favorite navigates to Projects
+      await projectsFav.click();
+      await expect(page.locator(".toolbar-title")).toHaveText("Projects");
+      await expect(projectsFav).toHaveClass(/active/);
+    });
   });
 
   test.describe("Non-Tauri browser fallback", () => {

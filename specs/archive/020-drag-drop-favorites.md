@@ -36,4 +36,4 @@ Allow users to drag and drop directories (from the main directory view or from t
 - **`src/index.css`**: Added styles for Favorites drop feedback, insertion indicator, sidebar context menu, and warning modal dialog.
 
 ## Amendments
-- None.
+- **2026-11-21 (WebView2 In-App Drag Fix):** Replaced HTML5 `draggable={true}` / `onDragOver` / `onDrop` for in-app folder dragging with a pointer-event-based drag system (`onPointerDown` with a 6px movement threshold on `window` `pointermove`, `pointerup`, and `Escape` cancel). On Windows Tauri v2, `dragDropEnabled: true` replaces WebView2's `IDropTarget` with Tauri's native OS drop handler, causing HTML5 drags to display the Windows no-entry cursor and never fire `onDragOver`/`onDrop`. The pointer-event drag renders a macOS Finder-style floating drag ghost, hit-tests `favoritesSectionRef` to drive the `accept` / `duplicate` / `full` Favorites drop states and cursors (`grabbing` / `copy` / `not-allowed`), and preserves Tauri's `getCurrentWebview().onDragDropEvent` for dragging folders from Windows Explorer.

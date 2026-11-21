@@ -1,7 +1,7 @@
 import type { FavoriteFolder, SidebarLocations } from "../types";
 
 export const MAX_FAVORITES_ITEMS = 10;
-export const FAVORITE_DRAG_MIME = "application/x-winfinder-folder";
+export type FavoriteDropState = "none" | "accept" | "duplicate" | "full";
 
 export function normalizePathKey(raw: string): string {
   const trimmed = raw.trim();

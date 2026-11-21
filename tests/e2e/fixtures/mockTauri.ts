@@ -293,7 +293,13 @@ export async function installMockTauri(page: Page): Promise<void> {
           };
 
         case "save_panel_states":
+        case "save_custom_favorites":
           return null;
+
+        case "check_directory_exists": {
+          const targetPath = args.path as string;
+          return Boolean(fsTree[targetPath]);
+        }
 
         case "resolve_panel_path": {
           const savedPath = args.savedPath as string | undefined;

@@ -14,48 +14,42 @@ import {
 import type { FavoriteFolder, PanelId, SidebarLocations } from "../types";
 import {
   countBuiltInFavorites,
-  FAVORITE_DRAG_MIME,
-  isPathInFavorites,
   MAX_FAVORITES_ITEMS,
+  type FavoriteDropState,
 } from "../utils/favorites";
 
 interface SidebarProps {
   locations: SidebarLocations | null;
   activePanel: PanelId;
   customFavorites: FavoriteFolder[];
-  draggingFolder: FavoriteFolder | null;
+  inAppDropState: FavoriteDropState;
   osDragOverFavorites: boolean;
   favoritesSectionRef: React.RefObject<HTMLDivElement | null>;
   width: number;
   onResizeWidth: (width: number) => void;
   onSelectPanel: (panel: PanelId) => void;
-  onAddFavorites: (folders: FavoriteFolder[]) => void;
   onRemoveFavorite: (path: string) => void;
   onWindowClose: () => void;
   onWindowMinimize: () => void;
   onWindowMaximize: () => void;
 }
 
-type DropState = "none" | "accept" | "duplicate" | "full";
-
 export const Sidebar: React.FC<SidebarProps> = ({
   locations,
   activePanel,
   customFavorites,
-  draggingFolder,
+  inAppDropState,
   osDragOverFavorites,
   favoritesSectionRef,
   width,
   onResizeWidth,
   onSelectPanel,
-  onAddFavorites,
   onRemoveFavorite,
   onWindowClose,
   onWindowMinimize,
   onWindowMaximize,
 }) => {
   const homeName = locations?.homeName || "Home";
-  const [dragOverState, setDragOverState] = useState<DropState>("none");
   const [contextMenu, setContextMenu] = useState<{
     x: number;
     y: number;
@@ -65,12 +59,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const builtInCount = countBuiltInFavorites(locations);
   const totalFavoritesCount = builtInCount + customFavorites.length;
   const isFavoritesFull = totalFavoritesCount >= MAX_FAVORITES_ITEMS;
-
-  useEffect(() => {
-    if (!draggingFolder) {
-      setDragOverState("none");
-    }
-  }, [draggingFolder]);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -109,70 +97,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
     window.addEventListener("mouseup", onMouseUp);
   };
 
-  const evaluateDropState = (): DropState => {
-    if (draggingFolder && isPathInFavorites(draggingFolder.path, locations, customFavorites)) {
-      return "duplicate";
-    }
-    if (isFavoritesFull) {
-      return "full";
-    }
-    return "accept";
-  };
-
-  const hasFolderDragPayload = (e: React.DragEvent): boolean => {
-    if (draggingFolder) return true;
-    return Array.from(e.dataTransfer.types).includes(FAVORITE_DRAG_MIME);
-  };
-
-  const handleFavoritesDragOver = (e: React.DragEvent<HTMLDivElement>) => {
-    if (!hasFolderDragPayload(e)) return;
-    e.preventDefault();
-    const nextState = evaluateDropState();
-    e.dataTransfer.dropEffect = nextState === "accept" ? "link" : "none";
-    if (dragOverState !== nextState) {
-      setDragOverState(nextState);
-    }
-  };
-
-  const handleFavoritesDragLeave = (e: React.DragEvent<HTMLDivElement>) => {
-    if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
-      setDragOverState("none");
-    }
-  };
-
-  const handleFavoritesDrop = (e: React.DragEvent<HTMLDivElement>) => {
-    if (!hasFolderDragPayload(e)) return;
-    e.preventDefault();
-    setDragOverState("none");
-
-    let folder: FavoriteFolder | null = null;
-    const raw = e.dataTransfer.getData(FAVORITE_DRAG_MIME);
-    if (raw) {
-      try {
-        const parsed = JSON.parse(raw) as Partial<FavoriteFolder>;
-        if (typeof parsed.path === "string" && parsed.path.trim()) {
-          folder = {
-            name: typeof parsed.name === "string" && parsed.name.trim() ? parsed.name : parsed.path,
-            path: parsed.path,
-          };
-        }
-      } catch {
-        // Fallback to draggingFolder
-      }
-    }
-    if (!folder && draggingFolder) {
-      folder = draggingFolder;
-    }
-    if (folder) {
-      onAddFavorites([folder]);
-    }
-  };
-
-  const effectiveDropState: DropState = osDragOverFavorites
+  const effectiveDropState: FavoriteDropState = osDragOverFavorites
     ? isFavoritesFull
       ? "full"
       : "accept"
-    : dragOverState;
+    : inAppDropState;
 
   return (
     <aside
@@ -246,10 +175,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 ? "favorites-drop-blocked"
                 : ""
           }`}
-          onDragEnter={handleFavoritesDragOver}
-          onDragOver={handleFavoritesDragOver}
-          onDragLeave={handleFavoritesDragLeave}
-          onDrop={handleFavoritesDrop}
         >
           <div className="sidebar-section-header">Favorites</div>
           <ul className="sidebar-list">
