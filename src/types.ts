@@ -95,9 +95,12 @@ export interface PanelState {
   columnPaths: string[];
 }
 
+export type ThemeMode = "light" | "dark";
+
 export interface AppSettings {
   useWindowsWindowControls: boolean;
   useEverythingCli?: boolean | null;
+  theme: ThemeMode;
 }
 
 export interface PersistedAppState {

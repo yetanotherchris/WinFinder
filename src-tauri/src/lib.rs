@@ -166,11 +166,35 @@ impl Default for PanelState {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+fn default_theme() -> String {
+    "light".to_string()
+}
+
+fn sanitize_theme(theme: &str) -> String {
+    if theme.eq_ignore_ascii_case("dark") {
+        "dark".to_string()
+    } else {
+        "light".to_string()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AppSettings {
     pub use_windows_window_controls: bool,
     pub use_everything_cli: Option<bool>,
+    #[serde(default = "default_theme")]
+    pub theme: String,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            use_windows_window_controls: false,
+            use_everything_cli: None,
+            theme: default_theme(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -283,6 +307,7 @@ impl PersistedAppState {
             sanitized_panels.insert(canonical_key, panel);
         }
         self.panels = sanitized_panels;
+        self.settings.theme = sanitize_theme(&self.settings.theme);
     }
 }
 
@@ -473,7 +498,8 @@ impl AppStateStore {
         self.save_now();
     }
 
-    fn update_settings(&self, settings: AppSettings) {
+    fn update_settings(&self, mut settings: AppSettings) {
+        settings.theme = sanitize_theme(&settings.theme);
         let mut guard = self.state.lock().unwrap();
         guard.settings = settings;
         drop(guard);
@@ -3128,6 +3154,7 @@ mod tests {
         let state: PersistedAppState = serde_json::from_str(legacy_json).unwrap();
         assert!(!state.settings.use_windows_window_controls);
         assert_eq!(state.settings.use_everything_cli, None);
+        assert_eq!(state.settings.theme, "light");
 
         let explicit_json =
             r#"{"activePanel":"home","panels":{},"settings":{"useEverythingCli":false}}"#;
@@ -3203,10 +3230,25 @@ mod tests {
     fn persisted_app_state_roundtrips_settings() {
         let mut state = PersistedAppState::default();
         state.settings.use_windows_window_controls = true;
+        state.settings.theme = "dark".to_string();
         let json = serde_json::to_string(&state).unwrap();
         assert!(json.contains("useWindowsWindowControls"));
+        assert!(json.contains(r#""theme":"dark""#));
         let decoded: PersistedAppState = serde_json::from_str(&json).unwrap();
         assert!(decoded.settings.use_windows_window_controls);
+        assert_eq!(decoded.settings.theme, "dark");
+    }
+
+    #[test]
+    fn persisted_app_state_sanitizes_invalid_theme() {
+        let mut state = PersistedAppState::default();
+        state.settings.theme = "neon".to_string();
+        state.sanitize();
+        assert_eq!(state.settings.theme, "light");
+
+        state.settings.theme = "DARK".to_string();
+        state.sanitize();
+        assert_eq!(state.settings.theme, "dark");
     }
 
     #[test]

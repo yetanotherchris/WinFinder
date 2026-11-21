@@ -40,6 +40,7 @@ import type {
   ResolvedGoToPath,
   SidebarLocations,
   SortConfig,
+  ThemeMode,
   TrackedPanelId,
   UnlockDriveResult,
   ViewMode,
@@ -56,9 +57,14 @@ function parseBitlockerLockedDrive(err: unknown): string | null {
   return null;
 }
 
+function normalizeTheme(value: unknown): ThemeMode {
+  return value === "dark" ? "dark" : "light";
+}
+
 const DEFAULT_SETTINGS: AppSettings = {
   useWindowsWindowControls: false,
   useEverythingCli: null,
+  theme: "light",
 };
 
 const DEFAULT_VIEW_MODE: ViewMode = "icons";
@@ -133,6 +139,7 @@ function loadBrowserSettings(): AppSettings {
         typeof parsed?.useEverythingCli === "boolean"
           ? parsed.useEverythingCli
           : null,
+      theme: normalizeTheme(parsed?.theme),
     };
   } catch {
     return DEFAULT_SETTINGS;
@@ -389,6 +396,12 @@ export const App: React.FC = () => {
       }
     }
   }, []);
+
+  useEffect(() => {
+    const theme = normalizeTheme(settings.theme);
+    document.documentElement.setAttribute("data-theme", theme);
+    document.documentElement.style.colorScheme = theme;
+  }, [settings.theme]);
 
   const handleAddFavorites = useCallback(
     (incoming: FavoriteFolder[]) => {
@@ -914,6 +927,7 @@ export const App: React.FC = () => {
               typeof persisted?.settings?.useEverythingCli === "boolean"
                 ? persisted.settings.useEverythingCli
                 : null,
+            theme: normalizeTheme(persisted?.settings?.theme),
           }
         : loadBrowserSettings();
       setSettings(initialSettings);
