@@ -7,6 +7,7 @@ import { Sidebar } from "./components/Sidebar";
 import { Toolbar } from "./components/Toolbar";
 import { MainView } from "./components/MainView";
 import { FileIcon } from "./components/FileIcon";
+import { SettingsDialog } from "./components/SettingsDialog";
 import { GoToPathModal } from "./components/GoToPathModal";
 import {
   getCachedDirectory,
@@ -27,6 +28,7 @@ import {
   resolveViewAnchorChain,
 } from "./utils/pathChain";
 import type {
+  AppSettings,
   CustomFavoritePanelId,
   DirectoryListing,
   FavoriteFolder,
@@ -40,6 +42,10 @@ import type {
   TrackedPanelId,
   ViewMode,
 } from "./types";
+
+const DEFAULT_SETTINGS: AppSettings = {
+  useWindowsWindowControls: false,
+};
 
 const DEFAULT_VIEW_MODE: ViewMode = "icons";
 const DEFAULT_SORT: SortConfig = {
@@ -100,6 +106,20 @@ function getRootPathForPanel(
 }
 
 const LOCAL_FAVORITES_STORAGE_KEY = "winfinder.customFavorites";
+const LOCAL_SETTINGS_STORAGE_KEY = "winfinder.settings";
+
+function loadBrowserSettings(): AppSettings {
+  try {
+    const raw = window.localStorage.getItem(LOCAL_SETTINGS_STORAGE_KEY);
+    if (!raw) return DEFAULT_SETTINGS;
+    const parsed = JSON.parse(raw);
+    return {
+      useWindowsWindowControls: Boolean(parsed?.useWindowsWindowControls),
+    };
+  } catch {
+    return DEFAULT_SETTINGS;
+  }
+}
 
 function loadBrowserCustomFavorites(): FavoriteFolder[] {
   try {
@@ -243,6 +263,9 @@ export const App: React.FC = () => {
     seq: number;
   } | null>(null);
   const [customFavorites, setCustomFavorites] = useState<FavoriteFolder[]>([]);
+  const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
+  const [settingsOpen, setSettingsOpen] = useState<boolean>(false);
+  const [isWindowMaximized, setIsWindowMaximized] = useState<boolean>(false);
   const [inAppDrag, setInAppDrag] = useState<InAppFolderDrag | null>(null);
   const [osDragOverFavorites, setOsDragOverFavorites] = useState<boolean>(false);
   const [missingFavorite, setMissingFavorite] = useState<FavoriteFolder | null>(null);
@@ -328,6 +351,19 @@ export const App: React.FC = () => {
     } else {
       try {
         window.localStorage.setItem(LOCAL_FAVORITES_STORAGE_KEY, JSON.stringify(next));
+      } catch {
+        // Ignore storage errors in browser preview
+      }
+    }
+  }, []);
+
+  const handleUpdateSettings = useCallback((next: AppSettings) => {
+    setSettings(next);
+    if (isTauriRuntime()) {
+      void invoke("save_settings", { settings: next });
+    } else {
+      try {
+        window.localStorage.setItem(LOCAL_SETTINGS_STORAGE_KEY, JSON.stringify(next));
       } catch {
         // Ignore storage errors in browser preview
       }
@@ -758,6 +794,15 @@ export const App: React.FC = () => {
       if (persisted?.panels) {
         panelStatesRef.current = persisted.panels;
       }
+
+      const initialSettings: AppSettings = isTauriRuntime()
+        ? {
+            useWindowsWindowControls: Boolean(
+              persisted?.settings?.useWindowsWindowControls
+            ),
+          }
+        : loadBrowserSettings();
+      setSettings(initialSettings);
 
       const rawFavorites = isTauriRuntime()
         ? (persisted?.customFavorites ?? [])
@@ -1734,10 +1779,52 @@ export const App: React.FC = () => {
   const handleWindowMaximize = useCallback(() => {
     if (isTauriRuntime()) {
       void getCurrentWindow().toggleMaximize();
+    } else {
+      setIsWindowMaximized((prev) => !prev);
     }
   }, []);
 
-  // Keyboard support: Ctrl/Cmd+F opens search; Ctrl/Cmd+Shift+G opens Go to Path; Backspace or Alt+Left goes back; dialog Escape/Enter handling
+  // Track window maximized state for Windows caption Restore/Maximize icon
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let cancelled = false;
+    let unlisten: (() => void) | null = null;
+    const win = getCurrentWindow();
+
+    const syncMaximized = () => {
+      void win
+        .isMaximized()
+        .then((max) => {
+          if (!cancelled) setIsWindowMaximized(max);
+        })
+        .catch(() => {
+          // Ignore if window state query fails
+        });
+    };
+
+    syncMaximized();
+    void win
+      .onResized(() => {
+        if (!cancelled) syncMaximized();
+      })
+      .then((fn) => {
+        if (cancelled) {
+          fn();
+        } else {
+          unlisten = fn;
+        }
+      })
+      .catch(() => {
+        // Ignore if resize listener is unavailable
+      });
+
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  }, []);
+
+  // Keyboard support: Ctrl/Cmd+F opens search; Ctrl/Cmd+Shift+G opens Go to Path; Ctrl+, opens Settings; Backspace or Alt+Left goes back; dialog Escape/Enter handling
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (missingFavorite) {
@@ -1749,6 +1836,19 @@ export const App: React.FC = () => {
           handleRemoveFavorite(missingFavorite.path);
           setMissingFavorite(null);
         }
+        return;
+      }
+      if (settingsOpen) {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          setSettingsOpen(false);
+        }
+        return;
+      }
+
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key === ",") {
+        e.preventDefault();
+        setSettingsOpen(true);
         return;
       }
 
@@ -1787,7 +1887,7 @@ export const App: React.FC = () => {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [goToPathOpen, handleBack, handleForward, handleOpenSearch, handleRemoveFavorite, missingFavorite]);
+  }, [goToPathOpen, handleBack, handleForward, handleOpenSearch, handleRemoveFavorite, missingFavorite, settingsOpen]);
 
   const isPendingNavigation = loading && pendingPath !== null;
   const displayTitle = isSearchMode
@@ -1818,6 +1918,7 @@ export const App: React.FC = () => {
         onResizeWidth={setSidebarWidth}
         onSelectPanel={(panel) => void handleSelectPanel(panel)}
         onRemoveFavorite={handleRemoveFavorite}
+        useWindowsWindowControls={settings.useWindowsWindowControls}
         onWindowClose={handleWindowClose}
         onWindowMinimize={handleWindowMinimize}
         onWindowMaximize={handleWindowMaximize}
@@ -1833,6 +1934,8 @@ export const App: React.FC = () => {
           sortConfig={sortConfig}
           showHidden={showHidden}
           selectedEntry={selectedEntry}
+          useWindowsWindowControls={settings.useWindowsWindowControls}
+          isWindowMaximized={isWindowMaximized}
           onBack={() => void handleBack()}
           onForward={() => void handleForward()}
           onChangeViewMode={handleChangeViewMode}
@@ -1847,6 +1950,10 @@ export const App: React.FC = () => {
           onCopyCurrentPath={() => void handleCopyCurrentPath()}
           onShowInExplorer={() => void handleShowInExplorer()}
           onRefresh={handleRefresh}
+          onOpenSettings={() => setSettingsOpen(true)}
+          onWindowClose={handleWindowClose}
+          onWindowMinimize={handleWindowMinimize}
+          onWindowMaximize={handleWindowMaximize}
           searchOpen={searchOpen}
           searchQuery={searchQuery}
           searchInputRef={searchInputRef}
@@ -1932,6 +2039,14 @@ export const App: React.FC = () => {
             <span className="folder-drag-ghost-badge">+</span>
           )}
         </div>
+      )}
+
+      {settingsOpen && (
+        <SettingsDialog
+          settings={settings}
+          onChange={handleUpdateSettings}
+          onClose={() => setSettingsOpen(false)}
+        />
       )}
 
       <GoToPathModal

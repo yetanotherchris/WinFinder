@@ -21,6 +21,7 @@ import {
   Terminal,
   RefreshCw,
   Share2,
+  Settings,
 } from "lucide-react";
 import type { FileEntry, SortConfig, SortField, ViewMode } from "../types";
 
@@ -33,6 +34,8 @@ interface ToolbarProps {
   sortConfig: SortConfig;
   showHidden: boolean;
   selectedEntry: FileEntry | null;
+  useWindowsWindowControls: boolean;
+  isWindowMaximized: boolean;
   onBack: () => void;
   onForward: () => void;
   onChangeViewMode: (mode: ViewMode) => void;
@@ -47,6 +50,10 @@ interface ToolbarProps {
   onCopyCurrentPath: () => void;
   onShowInExplorer: () => void;
   onRefresh: () => void;
+  onOpenSettings: () => void;
+  onWindowClose: () => void;
+  onWindowMinimize: () => void;
+  onWindowMaximize: () => void;
   searchOpen: boolean;
   searchQuery: string;
   searchInputRef: React.RefObject<HTMLInputElement | null>;
@@ -72,6 +79,8 @@ export const Toolbar: React.FC<ToolbarProps> = ({
   sortConfig,
   showHidden,
   selectedEntry,
+  useWindowsWindowControls,
+  isWindowMaximized,
   onBack,
   onForward,
   onChangeViewMode,
@@ -86,6 +95,10 @@ export const Toolbar: React.FC<ToolbarProps> = ({
   onCopyCurrentPath,
   onShowInExplorer,
   onRefresh,
+  onOpenSettings,
+  onWindowClose,
+  onWindowMinimize,
+  onWindowMaximize,
   searchOpen,
   searchQuery,
   searchInputRef,
@@ -161,7 +174,10 @@ export const Toolbar: React.FC<ToolbarProps> = ({
   };
 
   return (
-    <header className="finder-toolbar" data-tauri-drag-region>
+    <header
+      className={`finder-toolbar ${useWindowsWindowControls ? "has-win-controls" : ""}`}
+      data-tauri-drag-region
+    >
       {/* Left: Back/Forward + Folder Title */}
       <div className="toolbar-left" data-tauri-drag-region>
         <div className="nav-buttons">
@@ -551,11 +567,40 @@ export const Toolbar: React.FC<ToolbarProps> = ({
                 </span>
                 <span>Refresh</span>
               </button>
+
+              <div className="sort-menu-sep" />
+
+              <button
+                type="button"
+                role="menuitem"
+                className="sort-menu-item"
+                onClick={() => {
+                  setActionsMenuOpen(false);
+                  onOpenSettings();
+                }}
+              >
+                <span className="sort-check-slot">
+                  <Settings size={13} strokeWidth={2} />
+                </span>
+                <span>Settings…</span>
+                <span className="sort-menu-shortcut">Ctrl+,</span>
+              </button>
             </div>
           )}
         </div>
 
         <div className="toolbar-spacer-sm" />
+
+        {/* Settings */}
+        <button
+          type="button"
+          className="toolbar-btn"
+          onClick={onOpenSettings}
+          title="Settings (Ctrl+,)"
+          aria-label="Settings"
+        >
+          <Settings size={15} strokeWidth={1.8} />
+        </button>
 
         {/* Search */}
         {searchOpen ? (
@@ -613,6 +658,67 @@ export const Toolbar: React.FC<ToolbarProps> = ({
           </button>
         )}
       </div>
+
+      {useWindowsWindowControls && (
+        <div className="win-window-controls" role="group" aria-label="Window controls">
+          <button
+            type="button"
+            className="win-caption-btn win-caption-minimize"
+            onClick={onWindowMinimize}
+            title="Minimize"
+            aria-label="Minimize window"
+          >
+            <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+              <path d="M1 5H9" stroke="currentColor" strokeWidth="1" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            className="win-caption-btn win-caption-maximize"
+            onClick={onWindowMaximize}
+            title={isWindowMaximized ? "Restore" : "Maximize"}
+            aria-label={isWindowMaximized ? "Restore window" : "Maximize window"}
+          >
+            {isWindowMaximized ? (
+              <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+                <path
+                  d="M2.5 3.5H7.5V8.5H2.5V3.5ZM3.5 3.5V2H8.5V7H7.5"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1"
+                />
+              </svg>
+            ) : (
+              <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+                <rect
+                  x="1.5"
+                  y="1.5"
+                  width="7"
+                  height="7"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1"
+                />
+              </svg>
+            )}
+          </button>
+          <button
+            type="button"
+            className="win-caption-btn win-caption-close"
+            onClick={onWindowClose}
+            title="Close"
+            aria-label="Close window"
+          >
+            <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+              <path
+                d="M1.5 1.5L8.5 8.5M8.5 1.5L1.5 8.5"
+                stroke="currentColor"
+                strokeWidth="1.05"
+              />
+            </svg>
+          </button>
+        </div>
+      )}
     </header>
   );
 };
