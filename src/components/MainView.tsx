@@ -526,13 +526,14 @@ export const MainView: React.FC<MainViewProps> = ({
             setCachedDirectory(folderPath, showHidden, retried);
             setExpandedFolders((prev) => ({
               ...prev,
-              [folderPath]: { entries: retried.entries, loading: false, error: null },
+              [key]: { path: retried.currentPath, entries: retried.entries, loading: false, error: null },
             }));
             return;
           } catch (retryErr) {
             setExpandedFolders((prev) => ({
               ...prev,
-              [folderPath]: {
+              [key]: {
+                path: folderPath,
                 entries: [],
                 loading: false,
                 error: typeof retryErr === "string" ? retryErr : String(retryErr),
@@ -543,7 +544,8 @@ export const MainView: React.FC<MainViewProps> = ({
         }
         setExpandedFolders((prev) => ({
           ...prev,
-          [folderPath]: {
+          [key]: {
+            path: folderPath,
             entries: [],
             loading: false,
             error: "Locked with BitLocker",

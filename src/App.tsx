@@ -257,8 +257,6 @@ export const App: React.FC = () => {
   viewModeRef.current = viewMode;
   const sortConfigRef = useRef<SortConfig>(sortConfig);
   sortConfigRef.current = sortConfig;
-  const listingRef = useRef<DirectoryListing | null>(listing);
-  listingRef.current = listing;
   const selectedEntryRef = useRef<FileEntry | null>(selectedEntry);
   selectedEntryRef.current = selectedEntry;
   const expandedPathsRef = useRef<string[]>(expandedPaths);
