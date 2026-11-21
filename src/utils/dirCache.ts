@@ -42,7 +42,8 @@ export function entriesEqual(a: FileEntry[], b: FileEntry[]): boolean {
       ea.name !== eb.name ||
       ea.size !== eb.size ||
       ea.modifiedMs !== eb.modifiedMs ||
-      ea.isDir !== eb.isDir
+      ea.isDir !== eb.isDir ||
+      Boolean(ea.isLocked) !== Boolean(eb.isLocked)
     ) {
       return false;
     }

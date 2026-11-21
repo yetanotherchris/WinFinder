@@ -11,9 +11,12 @@ import {
   HardDrive,
   Globe,
   Trash2,
+  Lock,
+  X,
   Search,
 } from "lucide-react";
 import type {
+  BitlockerNotice,
   BreadcrumbItem,
   DirectoryListing,
   FavoriteFolder,
@@ -22,6 +25,17 @@ import type {
   SortField,
   ViewMode,
 } from "../types";
+
+const BITLOCKER_LOCKED_PREFIX = "BITLOCKER_LOCKED:";
+
+function parseBitlockerLockedDrive(err: unknown): string | null {
+  const raw = typeof err === "string" ? err : String(err);
+  if (raw.startsWith(BITLOCKER_LOCKED_PREFIX)) {
+    const root = raw.slice(BITLOCKER_LOCKED_PREFIX.length).trim();
+    return root || null;
+  }
+  return null;
+}
 import {
   formatDateModified,
   formatFileSize,
@@ -71,6 +85,10 @@ interface MainViewProps {
   isTrashView?: boolean;
   emptyingTrash?: boolean;
   onEmptyTrash?: () => void;
+  bitlockerNotice?: BitlockerNotice | null;
+  onUnlockDrive?: (targetPath: string, driveRoot?: string) => Promise<boolean>;
+  onDismissBitlockerNotice?: () => void;
+  onRetryUnlockDrive?: () => void;
   searchQuery?: string | null;
   searchScopeName?: string | null;
   onClearSearch?: () => void;
@@ -150,6 +168,10 @@ export const MainView: React.FC<MainViewProps> = ({
   isTrashView = false,
   emptyingTrash = false,
   onEmptyTrash,
+  bitlockerNotice = null,
+  onUnlockDrive,
+  onDismissBitlockerNotice,
+  onRetryUnlockDrive,
   searchQuery = null,
   searchScopeName = null,
   onClearSearch,
@@ -499,6 +521,45 @@ export const MainView: React.FC<MainViewProps> = ({
     } catch (err) {
       settled = true;
       window.clearTimeout(loadingTimer);
+      const lockedDriveRoot = parseBitlockerLockedDrive(err);
+      if (lockedDriveRoot && onUnlockDrive) {
+        const unlocked = await onUnlockDrive(folderPath, lockedDriveRoot);
+        if (unlocked) {
+          try {
+            const retried = await invoke<DirectoryListing>("list_directory", {
+              path: folderPath,
+              showHidden,
+            });
+            setCachedDirectory(folderPath, showHidden, retried);
+            setExpandedFolders((prev) => ({
+              ...prev,
+              [key]: { path: retried.currentPath, entries: retried.entries, loading: false, error: null },
+            }));
+            return;
+          } catch (retryErr) {
+            setExpandedFolders((prev) => ({
+              ...prev,
+              [key]: {
+                path: folderPath,
+                entries: [],
+                loading: false,
+                error: typeof retryErr === "string" ? retryErr : String(retryErr),
+              },
+            }));
+            return;
+          }
+        }
+        setExpandedFolders((prev) => ({
+          ...prev,
+          [key]: {
+            path: folderPath,
+            entries: [],
+            loading: false,
+            error: "Locked with BitLocker",
+          },
+        }));
+        return;
+      }
       setExpandedFolders((prev) => ({
         ...prev,
         [key]: {
@@ -845,6 +906,62 @@ export const MainView: React.FC<MainViewProps> = ({
       settled = true;
       window.clearTimeout(loadingTimer);
       if (reqId !== columnReqIdRef.current) return;
+      const lockedDriveRoot = parseBitlockerLockedDrive(err);
+      if (lockedDriveRoot && onUnlockDrive) {
+        const unlocked = await onUnlockDrive(entry.path, lockedDriveRoot);
+        if (reqId !== columnReqIdRef.current) return;
+        if (unlocked) {
+          try {
+            const retried = await invoke<DirectoryListing>("list_directory", {
+              path: entry.path,
+              showHidden,
+            });
+            setCachedDirectory(entry.path, showHidden, retried);
+            if (reqId !== columnReqIdRef.current) return;
+            setSubColumns((prev) => {
+              const next = prev.slice(0, colIndex);
+              next.push({
+                path: retried.currentPath,
+                entries: retried.entries,
+                selectedPath: null,
+                loading: false,
+                error: null,
+              });
+              return next;
+            });
+            scrollRight();
+            return;
+          } catch (retryErr) {
+            if (reqId !== columnReqIdRef.current) return;
+            setSubColumns((prev) => {
+              const next = prev.slice(0, colIndex);
+              next.push({
+                path: entry.path,
+                entries: [],
+                selectedPath: null,
+                loading: false,
+                error: typeof retryErr === "string" ? retryErr : String(retryErr),
+              });
+              return next;
+            });
+            scrollRight();
+            return;
+          }
+        }
+        setSubColumns((prev) => {
+          const next = prev.slice(0, colIndex);
+          next.push({
+            path: entry.path,
+            entries: [],
+            selectedPath: null,
+            loading: false,
+            error: "Locked with BitLocker",
+          });
+          return next;
+        });
+        scrollRight();
+        return;
+      }
       setSubColumns((prev) => {
         const next = prev.slice(0, colIndex);
         next.push({
@@ -1131,6 +1248,7 @@ export const MainView: React.FC<MainViewProps> = ({
                           entryKind={entry.entryKind}
                           extension={entry.extension}
                           iconDataUrl={entry.iconDataUrl}
+                          isLocked={entry.isLocked}
                           size={18}
                         />
                       </span>
@@ -1210,7 +1328,7 @@ export const MainView: React.FC<MainViewProps> = ({
                               onOpenItem(entry);
                             }
                           }}
-                          title={entry.name}
+                          title={entry.isLocked ? `${entry.name} (BitLocker Locked)` : entry.name}
                         >
                           <span className="miller-icon-slot">
                             <FileIcon
@@ -1219,6 +1337,7 @@ export const MainView: React.FC<MainViewProps> = ({
                               entryKind={entry.entryKind}
                               extension={entry.extension}
                               iconDataUrl={entry.iconDataUrl}
+                              isLocked={entry.isLocked}
                               size={18}
                             />
                           </span>
@@ -1313,6 +1432,7 @@ export const MainView: React.FC<MainViewProps> = ({
                     entryKind={galleryActiveItem.entryKind}
                     extension={galleryActiveItem.extension}
                     iconDataUrl={galleryActiveItem.iconDataUrl}
+                    isLocked={galleryActiveItem.isLocked}
                     size={124}
                   />
                 </div>
@@ -1361,7 +1481,7 @@ export const MainView: React.FC<MainViewProps> = ({
                       onOpenItem(entry);
                     }
                   }}
-                  title={entry.name}
+                  title={entry.isLocked ? `${entry.name} (BitLocker Locked)` : entry.name}
                 >
                   <div className="gallery-thumb-box">
                     <FileIcon
@@ -1370,6 +1490,7 @@ export const MainView: React.FC<MainViewProps> = ({
                       entryKind={entry.entryKind}
                       extension={entry.extension}
                       iconDataUrl={entry.iconDataUrl}
+                      isLocked={entry.isLocked}
                       size={44}
                     />
                   </div>
@@ -1411,7 +1532,7 @@ export const MainView: React.FC<MainViewProps> = ({
                   onOpenItem(entry);
                 }
               }}
-              title={entry.name}
+              title={entry.isLocked ? `${entry.name} (BitLocker Locked)` : entry.name}
             >
               <div className="icon-thumb">
                 <FileIcon
@@ -1420,6 +1541,7 @@ export const MainView: React.FC<MainViewProps> = ({
                   entryKind={entry.entryKind}
                   extension={entry.extension}
                   iconDataUrl={entry.iconDataUrl}
+                  isLocked={entry.isLocked}
                   size={62}
                 />
               </div>
@@ -1436,6 +1558,33 @@ export const MainView: React.FC<MainViewProps> = ({
 
   return (
     <div className="finder-main-wrapper">
+      {bitlockerNotice && (
+        <div className="bitlocker-banner" role="status" aria-live="polite">
+          <div className="bitlocker-banner-info">
+            <Lock size={14} strokeWidth={2} className="bitlocker-banner-icon" aria-hidden="true" />
+            <span className="bitlocker-banner-text">{bitlockerNotice.message}</span>
+          </div>
+          <div className="bitlocker-banner-actions">
+            <button
+              type="button"
+              className="bitlocker-unlock-btn"
+              onClick={() => onRetryUnlockDrive?.()}
+            >
+              Unlock…
+            </button>
+            <button
+              type="button"
+              className="bitlocker-dismiss-btn"
+              onClick={() => onDismissBitlockerNotice?.()}
+              aria-label="Dismiss BitLocker notice"
+              title="Dismiss"
+            >
+              <X size={13} strokeWidth={2.2} />
+            </button>
+          </div>
+        </div>
+      )}
+
       {isSearchView && (
         <div className="search-header-panel" role="region" aria-label="Search results">
           <div className="search-header-info">
