@@ -8,6 +8,7 @@ import {
   Home,
   HardDrive,
   Globe,
+  Trash2,
 } from "lucide-react";
 import type { PanelId, SidebarLocations } from "../types";
 
@@ -220,6 +221,17 @@ export const Sidebar: React.FC<SidebarProps> = ({
               >
                 <Globe className="sidebar-icon muted-gray" size={16} strokeWidth={1.8} />
                 <span className="sidebar-label">Network</span>
+              </button>
+            </li>
+            <li>
+              <button
+                type="button"
+                className={`sidebar-item interactive ${activePanel === "trash" ? "active" : ""}`}
+                onClick={() => onSelectPanel("trash")}
+                title="Trash"
+              >
+                <Trash2 className="sidebar-icon muted-gray" size={16} strokeWidth={1.8} />
+                <span className="sidebar-label">Trash</span>
               </button>
             </li>
           </ul>

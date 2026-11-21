@@ -62,6 +62,8 @@ function getRootPathForPanel(
       return "virtual://computer";
     case "network":
       return "virtual://network";
+    case "trash":
+      return "virtual://trash";
   }
 }
 
@@ -105,6 +107,7 @@ function labelForPendingPath(targetPath?: string, locations?: SidebarLocations |
   if (targetPath === "virtual://applications") return "Applications";
   if (targetPath === "virtual://computer") return "Drives";
   if (targetPath === "virtual://network") return "Network";
+  if (targetPath === "virtual://trash") return "Trash";
   const parts = targetPath.replace(/[\\/]+$/, "").split(/[\\/]/);
   return parts[parts.length - 1] || targetPath;
 }
@@ -124,7 +127,30 @@ export const App: React.FC = () => {
   const [expandedPaths, setExpandedPaths] = useState<string[]>([]);
   const [columnPaths, setColumnPaths] = useState<string[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
+  const [emptyingTrash, setEmptyingTrash] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  const mockTrashEntriesRef = useRef<FileEntry[]>([
+    {
+      name: "Old Draft.docx",
+      path: "trash://mock-1",
+      isDir: false,
+      entryKind: "file",
+      extension: "docx",
+      size: 24576,
+      modifiedMs: Date.now() - 5400_000,
+      iconDataUrl: null,
+    },
+    {
+      name: "Archived Notes",
+      path: "trash://mock-2",
+      isDir: true,
+      entryKind: "folder",
+      extension: null,
+      size: 0,
+      modifiedMs: Date.now() - 86400_000,
+      iconDataUrl: null,
+    },
+  ]);
   const requestIdRef = useRef(0);
   const loadingTimerRef = useRef<number | null>(null);
   const showHiddenRef = useRef(showHidden);
@@ -220,6 +246,21 @@ export const App: React.FC = () => {
       setSelectedEntry(null);
 
       if (!isTauriRuntime()) {
+        if (targetPath === "virtual://trash") {
+          const mockTrashListing: DirectoryListing = {
+            currentPath: "virtual://trash",
+            currentName: "Trash",
+            homePath: "~",
+            homeName: "Home",
+            breadcrumbs: [{ name: "Trash", path: "virtual://trash" }],
+            entries: [...mockTrashEntriesRef.current],
+            emptyMessage: "Trash is empty",
+          };
+          setListing(mockTrashListing);
+          setPendingPath(null);
+          setLoading(false);
+          return mockTrashListing;
+        }
         setListing(MOCK_PREVIEW_LISTING);
         setPendingPath(null);
         setLoading(false);
@@ -604,7 +645,11 @@ export const App: React.FC = () => {
           path: entry.path,
           entryKind: entry.entryKind,
         });
-        if (invoked && listing && !listing.currentPath.startsWith("virtual://")) {
+        if (
+          invoked &&
+          listing &&
+          (listing.currentPath === "virtual://trash" || !listing.currentPath.startsWith("virtual://"))
+        ) {
           invalidateCachedDirectory(listing.currentPath);
           void fetchDirectory(listing.currentPath, { forceRefresh: true });
         }
@@ -727,6 +772,25 @@ export const App: React.FC = () => {
       void fetchDirectory(undefined, { forceRefresh: true });
     }
   }, [fetchDirectory, listing]);
+
+  const handleEmptyTrash = useCallback(async () => {
+    if (emptyingTrash) return;
+    setEmptyingTrash(true);
+    setError(null);
+    try {
+      if (isTauriRuntime()) {
+        await invoke("empty_trash");
+      } else {
+        mockTrashEntriesRef.current = [];
+      }
+      invalidateCachedDirectory("virtual://trash");
+      await fetchDirectory("virtual://trash", { forceRefresh: true });
+    } catch (err) {
+      setError(typeof err === "string" ? err : String(err));
+    } finally {
+      setEmptyingTrash(false);
+    }
+  }, [emptyingTrash, fetchDirectory]);
 
   const navigateHistoryTo = useCallback(
     async (nextIndex: number) => {
@@ -889,6 +953,9 @@ export const App: React.FC = () => {
           onChangeSort={handleChangeSort}
           onExpandedPathsChange={handleExpandedPathsChange}
           onColumnPathsChange={handleColumnPathsChange}
+          isTrashView={activePath === "virtual://trash"}
+          emptyingTrash={emptyingTrash}
+          onEmptyTrash={() => void handleEmptyTrash()}
         />
       </div>
     </div>

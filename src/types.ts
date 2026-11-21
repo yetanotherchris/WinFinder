@@ -53,7 +53,8 @@ export type PanelId =
   | "downloads"
   | "home"
   | "drives"
-  | "network";
+  | "network"
+  | "trash";
 
 export type TrackedPanelId =
   | "recents"
