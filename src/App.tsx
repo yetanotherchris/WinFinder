@@ -20,6 +20,10 @@ import {
   normalizePathKey,
   type FavoriteDropState,
 } from "./utils/favorites";
+import {
+  buildDescendantChain,
+  resolveViewAnchorChain,
+} from "./utils/pathChain";
 import type {
   DirectoryListing,
   FavoriteFolder,
@@ -171,6 +175,11 @@ export const App: React.FC = () => {
   const [sortConfig, setSortConfig] = useState<SortConfig>(DEFAULT_SORT);
   const [expandedPaths, setExpandedPaths] = useState<string[]>([]);
   const [columnPaths, setColumnPaths] = useState<string[]>([]);
+  const [revealRequest, setRevealRequest] = useState<{
+    anchorRoot: string;
+    path: string;
+    seq: number;
+  } | null>(null);
   const [customFavorites, setCustomFavorites] = useState<FavoriteFolder[]>([]);
   const [inAppDrag, setInAppDrag] = useState<InAppFolderDrag | null>(null);
   const [osDragOverFavorites, setOsDragOverFavorites] = useState<boolean>(false);
@@ -229,6 +238,15 @@ export const App: React.FC = () => {
   viewModeRef.current = viewMode;
   const sortConfigRef = useRef<SortConfig>(sortConfig);
   sortConfigRef.current = sortConfig;
+  const listingRef = useRef<DirectoryListing | null>(listing);
+  listingRef.current = listing;
+  const selectedEntryRef = useRef<FileEntry | null>(selectedEntry);
+  selectedEntryRef.current = selectedEntry;
+  const expandedPathsRef = useRef<string[]>(expandedPaths);
+  expandedPathsRef.current = expandedPaths;
+  const columnPathsRef = useRef<string[]>(columnPaths);
+  columnPathsRef.current = columnPaths;
+  const revealSeqRef = useRef(0);
 
   const persistPanelStates = useCallback((trackedPanel?: TrackedPanelId) => {
     if (trackedPanel) {
@@ -900,6 +918,7 @@ export const App: React.FC = () => {
       clearSearch();
       const targetPanel = panelOverride ?? activePanelRef.current;
       if (activePath === path && activePanelRef.current === targetPanel && !error) return;
+      setRevealRequest(null);
       setExpandedPaths([]);
       setColumnPaths([]);
       const data = await fetchDirectory(path);
@@ -956,6 +975,7 @@ export const App: React.FC = () => {
       const wasSamePanel = activePanelRef.current === panel;
       activePanelRef.current = panel;
       setActivePanel(panel);
+      setRevealRequest(null);
 
       if (isTrackedPanel(panel)) {
         const saved = panelStatesRef.current[panel];
@@ -1077,20 +1097,116 @@ export const App: React.FC = () => {
 
   const handleChangeViewMode = useCallback(
     (nextMode: ViewMode) => {
+      const prevMode = viewModeRef.current;
       viewModeRef.current = nextMode;
       setViewMode(nextMode);
       const panel = activePanelRef.current;
-      if (isTrackedPanel(panel)) {
-        updateTrackedPanelState(panel, { viewMode: nextMode });
-      } else {
+      const currentListing = listingRef.current;
+
+      const persistEphemeral = () => {
         const prev = ephemeralPanelStatesRef.current[panel];
         ephemeralPanelStatesRef.current[panel] = {
           viewMode: nextMode,
           sort: prev?.sort ?? sortConfigRef.current,
         };
+      };
+
+      if ((nextMode === "list" || nextMode === "columns") && currentListing) {
+        const panelRoot = getRootPathForPanel(panel, locationsRef.current);
+        const chain = resolveViewAnchorChain(
+          currentListing.currentPath,
+          currentListing.breadcrumbs,
+          panelRoot
+        );
+
+        if (chain) {
+          const nextExpanded = nextMode === "list" ? chain.descendantPaths : [];
+          const nextColumns = nextMode === "columns" ? chain.descendantPaths : [];
+          expandedPathsRef.current = nextExpanded;
+          columnPathsRef.current = nextColumns;
+          setExpandedPaths(nextExpanded);
+          setColumnPaths(nextColumns);
+          setRevealRequest({
+            anchorRoot: chain.anchorRoot,
+            path: chain.targetPath,
+            seq: ++revealSeqRef.current,
+          });
+
+          if (isTrackedPanel(panel)) {
+            updateTrackedPanelState(panel, {
+              viewMode: nextMode,
+              lastPath: chain.anchorRoot,
+              expandedPaths: nextExpanded,
+              columnPaths: nextColumns,
+            });
+          } else {
+            persistEphemeral();
+          }
+
+          void fetchDirectory(chain.anchorRoot);
+          return;
+        }
+
+        // Already anchored at root: keep tree and Miller columns in sync when toggling between List and Columns
+        if (nextMode === "list" && prevMode === "columns" && columnPathsRef.current.length > 0) {
+          const synced = [...columnPathsRef.current];
+          expandedPathsRef.current = synced;
+          setExpandedPaths(synced);
+          setRevealRequest({
+            anchorRoot: currentListing.currentPath,
+            path: synced[synced.length - 1],
+            seq: ++revealSeqRef.current,
+          });
+          if (isTrackedPanel(panel)) {
+            updateTrackedPanelState(panel, {
+              viewMode: nextMode,
+              expandedPaths: synced,
+            });
+          } else {
+            persistEphemeral();
+          }
+          return;
+        }
+
+        if (nextMode === "columns" && prevMode === "list") {
+          const sel = selectedEntryRef.current;
+          const targetDir =
+            sel && sel.isDir
+              ? sel.path
+              : expandedPathsRef.current.length > 0
+                ? expandedPathsRef.current[expandedPathsRef.current.length - 1]
+                : null;
+          const subChain = targetDir
+            ? buildDescendantChain(currentListing.currentPath, targetDir)
+            : null;
+          if (subChain && subChain.length > 0) {
+            columnPathsRef.current = subChain;
+            setColumnPaths(subChain);
+            setRevealRequest({
+              anchorRoot: currentListing.currentPath,
+              path: subChain[subChain.length - 1],
+              seq: ++revealSeqRef.current,
+            });
+            if (isTrackedPanel(panel)) {
+              updateTrackedPanelState(panel, {
+                viewMode: nextMode,
+                columnPaths: subChain,
+              });
+            } else {
+              persistEphemeral();
+            }
+            return;
+          }
+        }
+      }
+
+      if (isTrackedPanel(panel)) {
+        updateTrackedPanelState(panel, { viewMode: nextMode });
+      } else {
+        persistEphemeral();
       }
     },
-    [updateTrackedPanelState]
+    [fetchDirectory, updateTrackedPanelState]
   );
 
   const handleChangeSort = useCallback(
@@ -1293,6 +1409,7 @@ export const App: React.FC = () => {
       const targetPanel = entry.panel;
       activePanelRef.current = targetPanel;
       setActivePanel(targetPanel);
+      setRevealRequest(null);
 
       if (isTrackedPanel(targetPanel)) {
         const saved = panelStatesRef.current[targetPanel];
@@ -1487,6 +1604,7 @@ export const App: React.FC = () => {
           showHidden={showHidden}
           expandedPaths={expandedPaths}
           columnPaths={columnPaths}
+          revealRequest={revealRequest}
           loading={isSearchMode ? searchLoading : loading}
           loadingMessage={loadingMessage}
           error={isSearchMode ? searchError : error}

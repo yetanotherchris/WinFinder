@@ -36,6 +36,13 @@ import {
   invalidateCachedDirectory,
   setCachedDirectory,
 } from "../utils/dirCache";
+import { normalizePathKey } from "../utils/favorites";
+
+interface RevealRequest {
+  anchorRoot: string;
+  path: string;
+  seq: number;
+}
 
 interface MainViewProps {
   currentPath: string;
@@ -48,6 +55,7 @@ interface MainViewProps {
   showHidden: boolean;
   expandedPaths: string[];
   columnPaths: string[];
+  revealRequest?: RevealRequest | null;
   loading: boolean;
   loadingMessage?: string;
   error: string | null;
@@ -77,6 +85,7 @@ interface MillerColumn {
 }
 
 interface ExpandedFolderState {
+  path: string;
   entries: FileEntry[];
   loading: boolean;
   error: string | null;
@@ -125,6 +134,7 @@ export const MainView: React.FC<MainViewProps> = ({
   showHidden,
   expandedPaths,
   columnPaths,
+  revealRequest = null,
   loading,
   loadingMessage,
   error,
@@ -208,6 +218,10 @@ export const MainView: React.FC<MainViewProps> = ({
 
   // List View inline folder disclosure state & Miller Columns persistence refs
   const [expandedFolders, setExpandedFolders] = useState<Record<string, ExpandedFolderState>>({});
+  const listRowElsRef = useRef<Map<string, HTMLDivElement>>(new Map());
+  const lastHandledRevealSeqRef = useRef<number>(0);
+  const onSelectRef = useRef(onSelect);
+  onSelectRef.current = onSelect;
   const expandedPathsRef = useRef<string[]>(expandedPaths);
   expandedPathsRef.current = expandedPaths;
   const onExpandedPathsChangeRef = useRef(onExpandedPathsChange);
@@ -335,7 +349,9 @@ export const MainView: React.FC<MainViewProps> = ({
     for (const folderPath of savedPaths) {
       const cached = getCachedDirectory(folderPath, showHidden);
       if (cached) {
-        initialExpanded[folderPath] = {
+        const key = normalizePathKey(folderPath);
+        initialExpanded[key] = {
+          path: cached.currentPath,
           entries: cached.entries,
           loading: false,
           error: null,
@@ -354,7 +370,11 @@ export const MainView: React.FC<MainViewProps> = ({
               showHidden,
             });
             setCachedDirectory(folderPath, showHidden, listing);
-            return { folderPath, entries: listing.entries, ok: true as const };
+            return {
+              folderPath: listing.currentPath,
+              entries: listing.entries,
+              ok: true as const,
+            };
           } catch {
             invalidateCachedDirectory(folderPath);
             return { folderPath, entries: [] as FileEntry[], ok: false as const };
@@ -369,9 +389,15 @@ export const MainView: React.FC<MainViewProps> = ({
       const validPaths: string[] = [];
       for (const r of results) {
         if (r.ok) {
-          restored[r.folderPath] = { entries: r.entries, loading: false, error: null };
+          const key = normalizePathKey(r.folderPath);
+          restored[key] = {
+            path: r.folderPath,
+            entries: r.entries,
+            loading: false,
+            error: null,
+          };
           validPaths.push(r.folderPath);
-          const prev = initialExpanded[r.folderPath];
+          const prev = initialExpanded[key];
           if (!prev || !entriesEqual(prev.entries, r.entries)) {
             changed = true;
           }
@@ -391,21 +417,25 @@ export const MainView: React.FC<MainViewProps> = ({
   }, [currentPath, viewMode, showHidden]);
 
   const toggleExpandFolder = async (folderPath: string) => {
-    if (expandedFolders[folderPath]) {
+    const key = normalizePathKey(folderPath);
+    if (expandedFolders[key]) {
       const nextMap = { ...expandedFolders };
-      delete nextMap[folderPath];
+      delete nextMap[key];
       setExpandedFolders(nextMap);
-      onExpandedPathsChange(Object.keys(nextMap));
+      onExpandedPathsChange(Object.values(nextMap).map((v) => v.path));
       return;
     }
 
-    const nextPaths = Array.from(new Set([...Object.keys(expandedFolders), folderPath]));
+    const existingPaths = Object.values(expandedFolders).map((v) => v.path);
+    const nextPaths = existingPaths.some((p) => normalizePathKey(p) === key)
+      ? existingPaths
+      : [...existingPaths, folderPath];
     onExpandedPathsChange(nextPaths);
 
     if (!isTauriRuntime()) {
       setExpandedFolders((prev) => ({
         ...prev,
-        [folderPath]: { entries: [], loading: false, error: null },
+        [key]: { path: folderPath, entries: [], loading: false, error: null },
       }));
       return;
     }
@@ -415,7 +445,7 @@ export const MainView: React.FC<MainViewProps> = ({
       // Instant expand from cache, then silently revalidate in background
       setExpandedFolders((prev) => ({
         ...prev,
-        [folderPath]: { entries: cached.entries, loading: false, error: null },
+        [key]: { path: cached.currentPath, entries: cached.entries, loading: false, error: null },
       }));
       try {
         const fresh = await invoke<DirectoryListing>("list_directory", {
@@ -425,10 +455,15 @@ export const MainView: React.FC<MainViewProps> = ({
         setCachedDirectory(folderPath, showHidden, fresh);
         if (!entriesEqual(cached.entries, fresh.entries)) {
           setExpandedFolders((prev) => {
-            if (!prev[folderPath]) return prev;
+            if (!prev[key]) return prev;
             return {
               ...prev,
-              [folderPath]: { entries: fresh.entries, loading: false, error: null },
+              [key]: {
+                path: fresh.currentPath,
+                entries: fresh.entries,
+                loading: false,
+                error: null,
+              },
             };
           });
         }
@@ -444,7 +479,7 @@ export const MainView: React.FC<MainViewProps> = ({
       if (!settled) {
         setExpandedFolders((prev) => ({
           ...prev,
-          [folderPath]: { entries: [], loading: true, error: null },
+          [key]: { path: folderPath, entries: [], loading: true, error: null },
         }));
       }
     }, 120);
@@ -459,14 +494,15 @@ export const MainView: React.FC<MainViewProps> = ({
       setCachedDirectory(folderPath, showHidden, result);
       setExpandedFolders((prev) => ({
         ...prev,
-        [folderPath]: { entries: result.entries, loading: false, error: null },
+        [key]: { path: result.currentPath, entries: result.entries, loading: false, error: null },
       }));
     } catch (err) {
       settled = true;
       window.clearTimeout(loadingTimer);
       setExpandedFolders((prev) => ({
         ...prev,
-        [folderPath]: {
+        [key]: {
+          path: folderPath,
           entries: [],
           loading: false,
           error: typeof err === "string" ? err : String(err),
@@ -484,7 +520,7 @@ export const MainView: React.FC<MainViewProps> = ({
       for (const entry of ordered) {
         rows.push({ kind: "entry", entry, depth });
         if (entry.isDir) {
-          const exp = expandedFolders[entry.path];
+          const exp = expandedFolders[normalizePathKey(entry.path)];
           if (exp) {
             if (exp.loading) {
               rows.push({
@@ -850,6 +886,56 @@ export const MainView: React.FC<MainViewProps> = ({
     })),
   ];
 
+  // Reveal, highlight, and scroll the target directory into view when switching to List or Columns view
+  useEffect(() => {
+    if (!revealRequest || loading) return;
+    if (revealRequest.seq === lastHandledRevealSeqRef.current) return;
+    if (!currentPath || normalizePathKey(currentPath) !== normalizePathKey(revealRequest.anchorRoot)) {
+      return;
+    }
+
+    const targetKey = normalizePathKey(revealRequest.path);
+
+    if (viewMode === "list") {
+      const matched = flatListRows.find(
+        (row) => row.kind === "entry" && normalizePathKey(row.entry.path) === targetKey
+      );
+      if (!matched || matched.kind !== "entry") return;
+
+      lastHandledRevealSeqRef.current = revealRequest.seq;
+      onSelectRef.current(matched.entry);
+      requestAnimationFrame(() => {
+        const el = listRowElsRef.current.get(targetKey);
+        el?.scrollIntoView({ block: "center", behavior: "auto" });
+      });
+      return;
+    }
+
+    if (viewMode === "columns") {
+      const colIdx = subColumns.findIndex(
+        (col) => !col.loading && normalizePathKey(col.path) === targetKey
+      );
+      if (colIdx === -1) return;
+
+      lastHandledRevealSeqRef.current = revealRequest.seq;
+      const parentEntries = colIdx === 0 ? sortedEntries : subColumns[colIdx - 1]?.entries ?? [];
+      const targetEntry = parentEntries.find((e) => normalizePathKey(e.path) === targetKey);
+      if (targetEntry) {
+        onSelectRef.current(targetEntry);
+      }
+
+      requestAnimationFrame(() => {
+        const container = columnsScrollRef.current;
+        if (!container) return;
+        const selectedRows = container.querySelectorAll<HTMLElement>(".miller-row.selected");
+        selectedRows.forEach((rowEl) => {
+          rowEl.scrollIntoView({ block: "center", inline: "nearest", behavior: "auto" });
+        });
+        container.scrollLeft = container.scrollWidth;
+      });
+    }
+  }, [revealRequest, loading, currentPath, viewMode, flatListRows, subColumns, sortedEntries]);
+
   const renderBody = () => {
     if (error) {
       return (
@@ -979,11 +1065,20 @@ export const MainView: React.FC<MainViewProps> = ({
                 }
 
                 const { entry, depth } = row;
-                const isSelected = selectedPath === entry.path;
-                const isExpanded = Boolean(expandedFolders[entry.path]);
+                const entryKey = normalizePathKey(entry.path);
+                const isSelected =
+                  selectedPath !== null && normalizePathKey(selectedPath) === entryKey;
+                const isExpanded = Boolean(expandedFolders[entryKey]);
                 return (
                   <div
                     key={entry.path}
+                    ref={(el) => {
+                      if (el) {
+                        listRowElsRef.current.set(entryKey, el);
+                      } else {
+                        listRowElsRef.current.delete(entryKey);
+                      }
+                    }}
                     role="row"
                     tabIndex={0}
                     style={listGridStyle}
@@ -1081,10 +1176,13 @@ export const MainView: React.FC<MainViewProps> = ({
                     <div className="miller-empty">Empty folder</div>
                   ) : (
                     col.entries.map((entry) => {
-                      const isSelected = col.selectedPath === entry.path;
+                      const entryKey = normalizePathKey(entry.path);
+                      const isSelected =
+                        col.selectedPath !== null &&
+                        normalizePathKey(col.selectedPath) === entryKey;
                       const isTrail =
                         colIdx < allMillerColumns.length - 1 &&
-                        allMillerColumns[colIdx + 1]?.path === entry.path;
+                        normalizePathKey(allMillerColumns[colIdx + 1].path) === entryKey;
                       return (
                         <button
                           key={entry.path}
