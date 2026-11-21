@@ -214,6 +214,7 @@ impl Default for SidebarVisibilitySettings {
 pub struct AppSettings {
     pub use_windows_window_controls: bool,
     pub sidebar_visibility: SidebarVisibilitySettings,
+    pub use_everything_cli: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -329,6 +330,50 @@ impl PersistedAppState {
     }
 }
 
+fn config_file_path_for_home(home: &Path) -> PathBuf {
+    home.join(".winfinder").join("config.json")
+}
+
+/// Migrates a legacy `~/.winfinder` regular file to `~/.winfinder/config.json`.
+/// Returns `Some(state)` if a legacy file existed and parsed as valid `PersistedAppState`.
+fn migrate_legacy_config_file(home: &Path) -> Option<PersistedAppState> {
+    let legacy_path = home.join(".winfinder");
+    if !legacy_path.is_file() {
+        return None;
+    }
+
+    let raw = fs::read_to_string(&legacy_path).ok();
+    let parsed = raw
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<PersistedAppState>(s).ok());
+
+    let backup_path = home.join(".winfinder.legacy.tmp");
+    let _ = fs::remove_file(&backup_path);
+    if fs::rename(&legacy_path, &backup_path).is_err() {
+        return parsed;
+    }
+
+    if fs::create_dir_all(&legacy_path).is_err() {
+        // Roll back so the legacy file is not lost.
+        let _ = fs::rename(&backup_path, &legacy_path);
+        return parsed;
+    }
+
+    let target_path = config_file_path_for_home(home);
+    if parsed.is_some() {
+        if fs::rename(&backup_path, &target_path).is_err() {
+            if let Some(raw_str) = raw {
+                let _ = fs::write(&target_path, raw_str);
+            }
+            let _ = fs::remove_file(&backup_path);
+        }
+    } else {
+        let _ = fs::remove_file(&backup_path);
+    }
+
+    parsed
+}
+
 struct AppStateStore {
     state_path: Option<PathBuf>,
     state: Mutex<PersistedAppState>,
@@ -337,21 +382,34 @@ struct AppStateStore {
 }
 
 impl AppStateStore {
-    fn load() -> Arc<Self> {
-        let state_path = dirs::home_dir().map(|h| h.join(".winfinder"));
-        let mut initial = state_path
-            .as_ref()
-            .and_then(|p| fs::read_to_string(p).ok())
-            .and_then(|raw| serde_json::from_str::<PersistedAppState>(&raw).ok())
-            .unwrap_or_default();
+    fn from_home(home: Option<PathBuf>) -> Self {
+        let (state_path, mut initial) = match home {
+            Some(home_dir) => {
+                let migrated = migrate_legacy_config_file(&home_dir);
+                let config_path = config_file_path_for_home(&home_dir);
+                let loaded = migrated
+                    .or_else(|| {
+                        fs::read_to_string(&config_path)
+                            .ok()
+                            .and_then(|raw| serde_json::from_str::<PersistedAppState>(&raw).ok())
+                    })
+                    .unwrap_or_default();
+                (Some(config_path), loaded)
+            }
+            None => (None, PersistedAppState::default()),
+        };
         initial.sanitize();
 
-        let store = Arc::new(Self {
+        Self {
             state_path,
             state: Mutex::new(initial),
             dirty: Mutex::new(false),
             dirty_cv: Condvar::new(),
-        });
+        }
+    }
+
+    fn load() -> Arc<Self> {
+        let store = Arc::new(Self::from_home(dirs::home_dir()));
         store.start_debounced_writer();
         store
     }
@@ -367,7 +425,7 @@ impl AppStateStore {
                 }
                 drop(dirty);
 
-                // Batch dirty state changes and flush to ~/.winfinder every 5 seconds
+                // Batch dirty state changes and flush to ~/.winfinder/config.json every 5 seconds
                 std::thread::sleep(flush_interval);
 
                 let mut dirty = store.dirty.lock().unwrap();
@@ -394,7 +452,15 @@ impl AppStateStore {
         let Ok(json) = serde_json::to_string_pretty(&snapshot) else {
             return;
         };
-        let tmp_path = path.with_file_name(".winfinder.tmp");
+        if let Some(parent) = path.parent() {
+            if parent.is_file() {
+                let _ = fs::remove_file(parent);
+            }
+            if fs::create_dir_all(parent).is_err() {
+                return;
+            }
+        }
+        let tmp_path = path.with_file_name("config.json.tmp");
         if fs::write(&tmp_path, &json).is_ok() {
             if fs::rename(&tmp_path, path).is_ok() {
                 return;
@@ -2165,10 +2231,126 @@ fn walk_search_directory(scope: &Path, query: &str, show_hidden: bool) -> Vec<Fi
     entries
 }
 
+fn find_executable_in_paths<I, P>(dirs: I, names: &[&str]) -> Option<PathBuf>
+where
+    I: IntoIterator<Item = P>,
+    P: AsRef<Path>,
+{
+    for dir in dirs {
+        let dir_path = dir.as_ref();
+        if dir_path.as_os_str().is_empty() {
+            continue;
+        }
+        for name in names {
+            let candidate = dir_path.join(name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn find_everything_cli_in_path() -> Option<PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    find_executable_in_paths(
+        std::env::split_paths(&path_var),
+        &["es.exe", "es.cmd", "es.bat"],
+    )
+}
+
+fn build_search_entries_from_paths(
+    scope: &Path,
+    raw_lines: &str,
+    show_hidden: bool,
+) -> Vec<FileEntry> {
+    use std::collections::HashSet;
+
+    let scope_key = normalize_path_key(&scope.to_string_lossy());
+    let mut seen = HashSet::new();
+    let mut entries = Vec::new();
+
+    for line in raw_lines.lines() {
+        let raw_path = line.trim();
+        if raw_path.is_empty() {
+            continue;
+        }
+        let key = normalize_path_key(raw_path);
+        if key == scope_key || !seen.insert(key) {
+            continue;
+        }
+        let entry_path = Path::new(raw_path);
+        let Ok(metadata) = fs::metadata(entry_path) else {
+            continue;
+        };
+        let name = display_name_for_path(entry_path);
+        if !show_hidden && is_hidden_entry(&name, &metadata) {
+            continue;
+        }
+        entries.push(file_entry_from_metadata(entry_path, name, &metadata));
+        if entries.len() >= MAX_SEARCH_RESULTS {
+            break;
+        }
+    }
+
+    entries.sort_by(|a, b| {
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+
+    entries
+}
+
+#[cfg(target_os = "windows")]
+fn query_everything_cli(
+    scope: &Path,
+    query: &str,
+    show_hidden: bool,
+) -> Result<Vec<FileEntry>, String> {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    let es_path = find_everything_cli_in_path()
+        .ok_or_else(|| "Everything CLI (es) is not installed in PATH".to_string())?;
+    let fetch_limit = if show_hidden {
+        MAX_SEARCH_RESULTS
+    } else {
+        MAX_SEARCH_RESULTS * 3
+    };
+
+    let output = Command::new(&es_path)
+        .arg("-n")
+        .arg(fetch_limit.to_string())
+        .arg("-path")
+        .arg(scope)
+        .arg(query)
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|e| format!("Failed to run Everything CLI: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let detail = if !stderr.trim().is_empty() {
+            stderr.trim().to_string()
+        } else {
+            stdout.trim().to_string()
+        };
+        return Err(format!("Everything CLI exited with error: {}", detail));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(build_search_entries_from_paths(scope, &stdout, show_hidden))
+}
+
 fn perform_search(
     query: &str,
     scope_path: Option<&str>,
     show_hidden: bool,
+    use_everything_cli: bool,
 ) -> Result<DirectoryListing, String> {
     let trimmed = query.trim();
     let (_home, home_path, home_name) = home_info()?;
@@ -2188,13 +2370,26 @@ fn perform_search(
     }
 
     #[cfg(target_os = "windows")]
-    let entries = match query_windows_search_index(&scope, trimmed, show_hidden) {
-        Ok(found) if !found.is_empty() => found,
-        _ => walk_search_directory(&scope, trimmed, show_hidden),
+    let entries = if use_everything_cli {
+        match query_everything_cli(&scope, trimmed, show_hidden) {
+            Ok(found) => found,
+            Err(_) => match query_windows_search_index(&scope, trimmed, show_hidden) {
+                Ok(found) if !found.is_empty() => found,
+                _ => walk_search_directory(&scope, trimmed, show_hidden),
+            },
+        }
+    } else {
+        match query_windows_search_index(&scope, trimmed, show_hidden) {
+            Ok(found) if !found.is_empty() => found,
+            _ => walk_search_directory(&scope, trimmed, show_hidden),
+        }
     };
 
     #[cfg(not(target_os = "windows"))]
-    let entries = walk_search_directory(&scope, trimmed, show_hidden);
+    let entries = {
+        let _ = use_everything_cli;
+        walk_search_directory(&scope, trimmed, show_hidden)
+    };
 
     Ok(DirectoryListing {
         current_path: format!("virtual://search?q={}", trimmed),
@@ -2212,10 +2407,12 @@ async fn search_directory(
     query: String,
     scope_path: Option<String>,
     show_hidden: Option<bool>,
+    store: tauri::State<'_, Arc<AppStateStore>>,
 ) -> Result<DirectoryListing, String> {
     let include_hidden = show_hidden.unwrap_or(false);
+    let use_everything_cli = store.snapshot().settings.use_everything_cli.unwrap_or(true);
     tauri::async_runtime::spawn_blocking(move || {
-        perform_search(&query, scope_path.as_deref(), include_hidden)
+        perform_search(&query, scope_path.as_deref(), include_hidden, use_everything_cli)
     })
     .await
     .map_err(|e| format!("Search failed: {}", e))?
@@ -2753,6 +2950,19 @@ fn save_settings(
 }
 
 #[tauri::command]
+fn check_everything_cli_installed() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        find_everything_cli_in_path().is_some()
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
+}
+
+#[tauri::command]
 fn check_directory_exists(path: String) -> bool {
     let trimmed = path.trim();
     if trimmed.is_empty() || trimmed.starts_with("virtual://") {
@@ -2942,6 +3152,7 @@ pub fn run() {
             resolve_go_to_path,
             save_custom_favorites,
             save_settings,
+            check_everything_cli_installed,
             check_directory_exists,
             validate_favorite_dirs,
             unlock_bitlocker_drive,
@@ -2960,6 +3171,7 @@ mod tests {
         let legacy_json = r#"{"activePanel":"home","panels":{}}"#;
         let state: PersistedAppState = serde_json::from_str(legacy_json).unwrap();
         assert!(!state.settings.use_windows_window_controls);
+        assert_eq!(state.settings.use_everything_cli, None);
         assert_eq!(
             state.settings.sidebar_visibility,
             SidebarVisibilitySettings::default()
@@ -2967,6 +3179,11 @@ mod tests {
         assert!(state.settings.sidebar_visibility.recents);
         assert!(state.settings.sidebar_visibility.home);
         assert!(state.settings.sidebar_visibility.trash);
+
+        let explicit_json =
+            r#"{"activePanel":"home","panels":{},"settings":{"useEverythingCli":false}}"#;
+        let explicit_state: PersistedAppState = serde_json::from_str(explicit_json).unwrap();
+        assert_eq!(explicit_state.settings.use_everything_cli, Some(false));
     }
 
     #[test]
@@ -2982,6 +3199,70 @@ mod tests {
         assert!(state.settings.sidebar_visibility.home);
         assert!(state.settings.sidebar_visibility.drives);
         assert!(state.settings.sidebar_visibility.trash);
+    }
+
+    #[test]
+    fn find_executable_in_paths_locates_matching_binary() {
+        let unique = format!(
+            "winfinder-es-path-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let base = std::env::temp_dir().join(unique);
+        let dir_a = base.join("a");
+        let dir_b = base.join("b");
+        fs::create_dir_all(&dir_a).unwrap();
+        fs::create_dir_all(&dir_b).unwrap();
+
+        let es_file = dir_b.join("es.exe");
+        fs::write(&es_file, b"").unwrap();
+
+        let found = find_executable_in_paths([&dir_a, &dir_b], &["es.exe", "es.cmd"]);
+        assert_eq!(found, Some(es_file));
+
+        let missing = find_executable_in_paths([&dir_a], &["es.exe", "es.cmd"]);
+        assert_eq!(missing, None);
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn build_search_entries_from_paths_filters_hidden_scope_and_deduplicates() {
+        let unique = format!(
+            "winfinder-es-parse-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let root = std::env::temp_dir().join(unique);
+        let sub = root.join("Reports");
+        fs::create_dir_all(&sub).unwrap();
+        let visible_file = sub.join("quarterly.txt");
+        let hidden_file = sub.join(".secret.txt");
+        fs::write(&visible_file, "ok").unwrap();
+        fs::write(&hidden_file, "hidden").unwrap();
+
+        let output = format!(
+            "{}\n{}\n{}\n{}\n{}\n",
+            root.display(),
+            visible_file.display(),
+            visible_file.display(),
+            sub.display(),
+            hidden_file.display(),
+        );
+
+        let visible = build_search_entries_from_paths(&root, &output, false);
+        let visible_names: Vec<&str> = visible.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(visible_names, vec!["Reports", "quarterly.txt"]);
+
+        let with_hidden = build_search_entries_from_paths(&root, &output, true);
+        let all_names: Vec<&str> = with_hidden.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(all_names, vec!["Reports", ".secret.txt", "quarterly.txt"]);
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -3364,5 +3645,101 @@ mod tests {
         assert!(resolve_user_path("   \"\"   ", None).is_err());
 
         let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn config_store_creates_dot_winfinder_dir_and_saves_config_json() {
+        let unique = format!(
+            "winfinder_config_fresh_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let fake_home = std::env::temp_dir().join(unique);
+        let _ = fs::remove_dir_all(&fake_home);
+        fs::create_dir_all(&fake_home).unwrap();
+
+        let store = AppStateStore::from_home(Some(fake_home.clone()));
+        assert_eq!(
+            store.state_path.as_deref(),
+            Some(fake_home.join(".winfinder").join("config.json").as_path())
+        );
+
+        store.update_settings(AppSettings {
+            use_windows_window_controls: true,
+        });
+
+        let config_path = fake_home.join(".winfinder").join("config.json");
+        assert!(fake_home.join(".winfinder").is_dir());
+        assert!(config_path.is_file());
+
+        let reloaded = AppStateStore::from_home(Some(fake_home.clone()));
+        assert!(reloaded.snapshot().settings.use_windows_window_controls);
+
+        let _ = fs::remove_dir_all(&fake_home);
+    }
+
+    #[test]
+    fn config_store_migrates_legacy_dot_winfinder_file() {
+        let unique = format!(
+            "winfinder_config_migrate_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let fake_home = std::env::temp_dir().join(unique);
+        let _ = fs::remove_dir_all(&fake_home);
+        fs::create_dir_all(&fake_home).unwrap();
+
+        let legacy_file = fake_home.join(".winfinder");
+        let legacy_json = r#"{"activePanel":"documents","panels":{},"settings":{"useWindowsWindowControls":true}}"#;
+        fs::write(&legacy_file, legacy_json).unwrap();
+
+        let store = AppStateStore::from_home(Some(fake_home.clone()));
+        let snap = store.snapshot();
+        assert_eq!(snap.active_panel, "documents");
+        assert!(snap.settings.use_windows_window_controls);
+        assert!(fake_home.join(".winfinder").is_dir());
+        assert!(fake_home.join(".winfinder").join("config.json").is_file());
+        assert!(!fake_home.join(".winfinder.legacy.tmp").exists());
+
+        let _ = fs::remove_dir_all(&fake_home);
+    }
+
+    #[test]
+    fn config_store_handles_corrupt_legacy_dot_winfinder_file() {
+        let unique = format!(
+            "winfinder_config_corrupt_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let fake_home = std::env::temp_dir().join(unique);
+        let _ = fs::remove_dir_all(&fake_home);
+        fs::create_dir_all(&fake_home).unwrap();
+
+        let legacy_file = fake_home.join(".winfinder");
+        fs::write(&legacy_file, "{ not valid json").unwrap();
+
+        let store = AppStateStore::from_home(Some(fake_home.clone()));
+        let snap = store.snapshot();
+        assert_eq!(snap.active_panel, "home");
+        assert!(!snap.settings.use_windows_window_controls);
+        assert!(fake_home.join(".winfinder").is_dir());
+        assert!(!fake_home.join(".winfinder.legacy.tmp").exists());
+
+        // Subsequent save succeeds into ~/.winfinder/config.json
+        store.update_settings(AppSettings {
+            use_windows_window_controls: true,
+        });
+        assert!(fake_home.join(".winfinder").join("config.json").is_file());
+
+        let _ = fs::remove_dir_all(&fake_home);
     }
 }

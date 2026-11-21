@@ -1,4 +1,5 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import {
   ArrowDownCircle,
   Clock,
@@ -39,6 +40,11 @@ interface SettingsDialogProps {
   onClose: () => void;
 }
 
+type EverythingCliStatus = "checking" | "installed" | "missing";
+
+const isTauriRuntime = () =>
+  typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
 export const SettingsDialog: React.FC<SettingsDialogProps> = ({
   settings,
   locations,
@@ -47,11 +53,50 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
 }) => {
   const [activeTab, setActiveTab] = useState<SettingsTab>("general");
   const homeName = locations?.homeName || "Home";
+  const [everythingStatus, setEverythingStatus] = useState<EverythingCliStatus>(
+    isTauriRuntime() ? "checking" : "missing"
+  );
+
+  useEffect(() => {
+    if (!isTauriRuntime()) {
+      setEverythingStatus("missing");
+      return;
+    }
+
+    let cancelled = false;
+    invoke<boolean>("check_everything_cli_installed")
+      .then((installed) => {
+        if (!cancelled) {
+          setEverythingStatus(installed ? "installed" : "missing");
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setEverythingStatus("missing");
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const everythingInstalled = everythingStatus === "installed";
+  const everythingEnabled =
+    everythingInstalled && (settings.useEverythingCli ?? true);
 
   const toggleWindowsControls = () => {
     onChange({
       ...settings,
       useWindowsWindowControls: !settings.useWindowsWindowControls,
+    });
+  };
+
+  const toggleEverythingCli = () => {
+    if (!everythingInstalled) return;
+    onChange({
+      ...settings,
+      useEverythingCli: !everythingEnabled,
     });
   };
 
@@ -248,6 +293,41 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
                 </button>
               </div>
             </div>
+
+            <div className="settings-section-label">Search</div>
+            <div className="settings-group">
+              <div className={`settings-row ${!everythingInstalled ? "is-disabled" : ""}`}>
+                <div className="settings-row-text">
+                  <span id="setting-everything-cli-label" className="settings-row-title">
+                    Use Everything CLI (es)
+                  </span>
+                  <span id="setting-everything-cli-desc" className="settings-row-desc">
+                    Use the Everything Command-Line Interface for instant file and folder search.
+                  </span>
+                  {everythingStatus === "missing" && (
+                    <span id="setting-everything-cli-hint" className="settings-row-hint">
+                      Everything CLI (es) was not found in PATH. Install it to enable this setting.
+                    </span>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  disabled={!everythingInstalled}
+                  aria-checked={everythingEnabled}
+                  aria-labelledby="setting-everything-cli-label"
+                  aria-describedby={
+                    everythingStatus === "missing"
+                      ? "setting-everything-cli-desc setting-everything-cli-hint"
+                      : "setting-everything-cli-desc"
+                  }
+                  className={`macos-switch ${everythingEnabled ? "is-on" : ""}`}
+                  onClick={toggleEverythingCli}
+                >
+                  <span className="macos-switch-thumb" aria-hidden="true" />
+                </button>
+              </div>
+            </div>
           </div>
         )}
 
@@ -286,7 +366,7 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
         )}
 
         <div className="settings-dialog-footer">
-          <span className="settings-storage-hint">Saved to ~/.winfinder</span>
+          <span className="settings-storage-hint">Saved to ~/.winfinder/config.json</span>
           <button
             type="button"
             className="finder-dialog-btn finder-dialog-btn-primary settings-done-btn"

@@ -110,6 +110,7 @@ export interface SidebarVisibilitySettings {
 export interface AppSettings {
   useWindowsWindowControls: boolean;
   sidebarVisibility: SidebarVisibilitySettings;
+  useEverythingCli?: boolean | null;
 }
 
 export interface PersistedAppState {
