@@ -437,25 +437,8 @@ fn display_name_for_path(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
-fn build_breadcrumbs(home: &Path, current: &Path) -> Vec<BreadcrumbItem> {
-    // If inside home, anchor breadcrumbs at home
-    if let Ok(relative) = current.strip_prefix(home) {
-        let mut crumbs = vec![BreadcrumbItem {
-            name: display_name_for_path(home),
-            path: home.to_string_lossy().into_owned(),
-        }];
-        let mut running = home.to_path_buf();
-        for comp in relative.components() {
-            running.push(comp.as_os_str());
-            crumbs.push(BreadcrumbItem {
-                name: comp.as_os_str().to_string_lossy().into_owned(),
-                path: running.to_string_lossy().into_owned(),
-            });
-        }
-        return crumbs;
-    }
-
-    // Otherwise build from filesystem root (e.g. C:\ > Users > ... or / > usr > ...)
+fn build_breadcrumbs(current: &Path) -> Vec<BreadcrumbItem> {
+    // Always build the full path from filesystem root (e.g. C:\ > Users > chris > Documents or / > Users > chris > Documents)
     let mut crumbs = Vec::new();
     let mut running = PathBuf::new();
 
@@ -501,7 +484,7 @@ fn home_info() -> Result<(PathBuf, String, String), String> {
 }
 
 fn list_fs_directory(target: &Path, show_hidden: bool) -> Result<DirectoryListing, String> {
-    let (home, home_path, home_name) = home_info()?;
+    let (_home, home_path, home_name) = home_info()?;
 
     let read_dir =
         fs::read_dir(target).map_err(|e| format!("Unable to read folder contents: {}", e))?;
@@ -556,7 +539,7 @@ fn list_fs_directory(target: &Path, show_hidden: bool) -> Result<DirectoryListin
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
 
-    let breadcrumbs = build_breadcrumbs(&home, target);
+    let breadcrumbs = build_breadcrumbs(target);
 
     Ok(DirectoryListing {
         current_path: target.to_string_lossy().into_owned(),
@@ -1689,4 +1672,63 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running WinFinder");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn build_breadcrumbs_full_windows_path_inside_home() {
+        let crumbs = build_breadcrumbs(Path::new(r"C:\Users\chris\Documents"));
+        let pairs: Vec<(&str, &str)> = crumbs
+            .iter()
+            .map(|c| (c.name.as_str(), c.path.as_str()))
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![
+                (r"C:\", r"C:\"),
+                ("Users", r"C:\Users"),
+                ("chris", r"C:\Users\chris"),
+                ("Documents", r"C:\Users\chris\Documents"),
+            ]
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn build_breadcrumbs_windows_root_and_deep_path() {
+        let root = build_breadcrumbs(Path::new(r"C:\"));
+        assert_eq!(root.len(), 1);
+        assert_eq!(root[0].name, r"C:\");
+        assert_eq!(root[0].path, r"C:\");
+
+        let deep = build_breadcrumbs(Path::new(r"C:\Users\chris\Documents\GitHub\WinFinder\src\components"));
+        let names: Vec<&str> = deep.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![r"C:\", "Users", "chris", "Documents", "GitHub", "WinFinder", "src", "components"]
+        );
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn build_breadcrumbs_full_unix_path() {
+        let crumbs = build_breadcrumbs(Path::new("/Users/chris/Documents"));
+        let pairs: Vec<(&str, &str)> = crumbs
+            .iter()
+            .map(|c| (c.name.as_str(), c.path.as_str()))
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![
+                ("/", "/"),
+                ("Users", "/Users"),
+                ("chris", "/Users/chris"),
+                ("Documents", "/Users/chris/Documents"),
+            ]
+        );
+    }
 }
