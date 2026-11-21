@@ -453,7 +453,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
                 type="button"
                 role="menuitem"
                 className="sort-menu-item"
-                disabled={!isRealDirectory}
+                disabled={!isRealDirectory && !isRealFsItem}
                 onClick={() => {
                   setActionsMenuOpen(false);
                   onOpenInTerminal();

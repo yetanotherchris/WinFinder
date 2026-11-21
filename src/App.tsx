@@ -242,13 +242,25 @@ export const App: React.FC = () => {
   }, [fetchDirectory, listing]);
 
   const handleOpenInTerminal = useCallback(async () => {
-    if (!isTauriRuntime() || !listing || listing.currentPath.startsWith("virtual://")) return;
+    if (!isTauriRuntime()) return;
+    const hasRealSelection = Boolean(
+      selectedEntry &&
+        selectedEntry.entryKind !== "app" &&
+        !selectedEntry.path.startsWith("virtual://")
+    );
+    const targetPath =
+      hasRealSelection && selectedEntry
+        ? selectedEntry.path
+        : listing && !listing.currentPath.startsWith("virtual://")
+          ? listing.currentPath
+          : null;
+    if (!targetPath) return;
     try {
-      await invoke("open_in_terminal", { path: listing.currentPath });
+      await invoke("open_in_terminal", { path: targetPath });
     } catch (err) {
       setError(typeof err === "string" ? err : String(err));
     }
-  }, [listing]);
+  }, [listing, selectedEntry]);
 
   const handleCopyCurrentPath = useCallback(async () => {
     if (!listing || listing.currentPath.startsWith("virtual://")) return;

@@ -1185,10 +1185,18 @@ fn create_new_folder(parent_path: String) -> Result<String, String> {
 
 #[tauri::command]
 fn open_in_terminal(path: String) -> Result<(), String> {
-    let dir = Path::new(&path);
-    if !dir.is_dir() {
+    let raw = Path::new(&path);
+    let dir = if raw.is_dir() {
+        raw.to_path_buf()
+    } else if raw.exists() {
+        raw.parent()
+            .filter(|p| p.is_dir())
+            .map(Path::to_path_buf)
+            .ok_or_else(|| "Cannot determine parent folder for this item".to_string())?
+    } else {
         return Err("Cannot open terminal for this location".to_string());
-    }
+    };
+    let dir_str = dir.to_string_lossy().into_owned();
 
     #[cfg(target_os = "windows")]
     {
@@ -1198,7 +1206,7 @@ fn open_in_terminal(path: String) -> Result<(), String> {
 
         // Prefer Windows Terminal if installed, otherwise fall back to PowerShell
         if Command::new("wt.exe")
-            .args(["-d", &path])
+            .args(["-d", &dir_str])
             .creation_flags(CREATE_NO_WINDOW)
             .spawn()
             .is_ok()
@@ -1208,7 +1216,7 @@ fn open_in_terminal(path: String) -> Result<(), String> {
 
         Command::new("cmd")
             .args(["/C", "start", "powershell.exe", "-NoExit"])
-            .current_dir(dir)
+            .current_dir(&dir)
             .creation_flags(CREATE_NO_WINDOW)
             .spawn()
             .map_err(|e| format!("Failed to open Terminal: {}", e))?;
@@ -1218,7 +1226,7 @@ fn open_in_terminal(path: String) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         std::process::Command::new("open")
-            .args(["-a", "Terminal", &path])
+            .args(["-a", "Terminal", &dir_str])
             .spawn()
             .map_err(|e| format!("Failed to open Terminal: {}", e))?;
         Ok(())
@@ -1226,8 +1234,9 @@ fn open_in_terminal(path: String) -> Result<(), String> {
 
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
+        let _ = dir_str;
         std::process::Command::new("x-terminal-emulator")
-            .current_dir(dir)
+            .current_dir(&dir)
             .spawn()
             .map_err(|e| format!("Failed to open Terminal: {}", e))?;
         Ok(())
