@@ -12,8 +12,18 @@ use tauri::Manager;
 const TRACKED_PANELS: &[&str] = &["recents", "desktop", "documents", "downloads", "home"];
 const MAX_FAVORITES: usize = 10;
 
+fn is_custom_favorite_panel(panel_id: &str) -> bool {
+    panel_id
+        .strip_prefix("fav:")
+        .map(|p| {
+            let trimmed = p.trim();
+            !trimmed.is_empty() && !trimmed.starts_with("virtual://")
+        })
+        .unwrap_or(false)
+}
+
 fn is_tracked_panel(panel_id: &str) -> bool {
-    TRACKED_PANELS.contains(&panel_id)
+    TRACKED_PANELS.contains(&panel_id) || is_custom_favorite_panel(panel_id)
 }
 
 fn normalize_path_key(raw: &str) -> String {
@@ -178,11 +188,73 @@ impl Default for PersistedAppState {
 
 impl PersistedAppState {
     fn sanitize(&mut self) {
-        if !is_tracked_panel(&self.active_panel) {
+        // 1. Clean custom_favorites first so we know which fav:<path> panel keys are valid
+        let mut seen = std::collections::HashSet::new();
+        let mut fav_panel_by_key: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        let mut cleaned = Vec::new();
+        for fav in std::mem::take(&mut self.custom_favorites) {
+            let trimmed_path = fav.path.trim().to_string();
+            if trimmed_path.is_empty() || trimmed_path.starts_with("virtual://") {
+                continue;
+            }
+            let key = normalize_path_key(&trimmed_path);
+            if !seen.insert(key.clone()) {
+                continue;
+            }
+            let name = if fav.name.trim().is_empty() {
+                display_name_for_path(Path::new(&trimmed_path))
+            } else {
+                fav.name.trim().to_string()
+            };
+            fav_panel_by_key.insert(key, format!("fav:{}", trimmed_path));
+            cleaned.push(FavoriteFolder {
+                name,
+                path: trimmed_path,
+            });
+            if cleaned.len() >= MAX_FAVORITES {
+                break;
+            }
+        }
+        self.custom_favorites = cleaned;
+
+        // 2. Validate & canonicalize active_panel
+        if let Some(fav_path) = self.active_panel.strip_prefix("fav:") {
+            let key = normalize_path_key(fav_path);
+            if let Some(canonical_panel) = fav_panel_by_key.get(&key) {
+                self.active_panel = canonical_panel.clone();
+            } else {
+                self.active_panel = "home".to_string();
+            }
+        } else if !TRACKED_PANELS.contains(&self.active_panel.as_str()) {
             self.active_panel = "home".to_string();
         }
-        self.panels.retain(|k, _| is_tracked_panel(k));
-        for panel in self.panels.values_mut() {
+
+        // 3. Retain & canonicalize tracked panels (built-in + existing custom favorites)
+        let mut sanitized_panels = BTreeMap::new();
+        for (panel_key, mut panel) in std::mem::take(&mut self.panels) {
+            let canonical_key = if let Some(fav_path) = panel_key.strip_prefix("fav:") {
+                let key = normalize_path_key(fav_path);
+                match fav_panel_by_key.get(&key) {
+                    Some(canonical) => {
+                        let root_path = &canonical[4..];
+                        if let Some(last_path) = panel.last_path.as_deref() {
+                            if !is_path_within_root(last_path, root_path) {
+                                panel.last_path = Some(root_path.to_string());
+                                panel.expanded_paths.clear();
+                                panel.column_paths.clear();
+                            }
+                        }
+                        canonical.clone()
+                    }
+                    None => continue,
+                }
+            } else if TRACKED_PANELS.contains(&panel_key.as_str()) {
+                panel_key
+            } else {
+                continue;
+            };
+
             if !matches!(
                 panel.view_mode.as_str(),
                 "icons" | "list" | "columns" | "gallery"
@@ -198,33 +270,10 @@ impl PersistedAppState {
             if !matches!(panel.sort.direction.as_str(), "asc" | "desc") {
                 panel.sort.direction = "asc".to_string();
             }
-        }
 
-        let mut seen = std::collections::HashSet::new();
-        let mut cleaned = Vec::new();
-        for fav in std::mem::take(&mut self.custom_favorites) {
-            let trimmed_path = fav.path.trim().to_string();
-            if trimmed_path.is_empty() || trimmed_path.starts_with("virtual://") {
-                continue;
-            }
-            let key = normalize_path_key(&trimmed_path);
-            if !seen.insert(key) {
-                continue;
-            }
-            let name = if fav.name.trim().is_empty() {
-                display_name_for_path(Path::new(&trimmed_path))
-            } else {
-                fav.name.trim().to_string()
-            };
-            cleaned.push(FavoriteFolder {
-                name,
-                path: trimmed_path,
-            });
-            if cleaned.len() >= MAX_FAVORITES {
-                break;
-            }
+            sanitized_panels.insert(canonical_key, panel);
         }
-        self.custom_favorites = cleaned;
+        self.panels = sanitized_panels;
     }
 }
 
@@ -2739,6 +2788,123 @@ mod tests {
         assert!(hidden_names.contains(&".hidden_report.txt"));
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn path_within_root_checks_segment_boundaries() {
+        #[cfg(target_os = "windows")]
+        {
+            assert!(is_path_within_root(
+                r"C:\Users\chris\Projects",
+                r"C:\Users\chris\Projects"
+            ));
+            assert!(is_path_within_root(
+                r"C:\Users\chris\Projects\WinFinder",
+                r"C:\Users\chris\Projects"
+            ));
+            assert!(is_path_within_root(
+                r"c:\users\chris\projects\winfinder",
+                r"C:\Users\chris\Projects"
+            ));
+            assert!(!is_path_within_root(
+                r"C:\Users\chris\Projects2",
+                r"C:\Users\chris\Projects"
+            ));
+            assert!(!is_path_within_root(r"C:\", r"C:\Users\chris\Projects"));
+            assert!(is_path_within_root(r"C:\Users", r"C:\"));
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            assert!(is_path_within_root("/Users/chris/Projects", "/Users/chris/Projects"));
+            assert!(is_path_within_root("/Users/chris/Projects/WinFinder", "/Users/chris/Projects"));
+            assert!(!is_path_within_root("/Users/chris/Projects2", "/Users/chris/Projects"));
+            assert!(!is_path_within_root("/", "/Users/chris/Projects"));
+            assert!(is_path_within_root("/Users", "/"));
+        }
+    }
+
+    #[test]
+    fn sanitize_keeps_valid_custom_favorite_state_and_prunes_removed() {
+        let fav_root = if cfg!(target_os = "windows") {
+            r"C:\Users\chris\Projects"
+        } else {
+            "/Users/chris/Projects"
+        };
+        let fav_sub = if cfg!(target_os = "windows") {
+            r"C:\Users\chris\Projects\WinFinder"
+        } else {
+            "/Users/chris/Projects/WinFinder"
+        };
+        let outside = if cfg!(target_os = "windows") {
+            r"C:\"
+        } else {
+            "/"
+        };
+        let removed_root = if cfg!(target_os = "windows") {
+            r"C:\Users\chris\OldFav"
+        } else {
+            "/Users/chris/OldFav"
+        };
+
+        let fav_panel = format!("fav:{}", fav_root);
+        let removed_panel = format!("fav:{}", removed_root);
+
+        let mut panels = BTreeMap::new();
+        panels.insert(
+            fav_panel.clone(),
+            PanelState {
+                view_mode: "list".to_string(),
+                sort: PersistedSortConfig::default(),
+                last_path: Some(fav_sub.to_string()),
+                expanded_paths: vec![fav_sub.to_string()],
+                column_paths: vec![],
+            },
+        );
+        panels.insert(
+            removed_panel.clone(),
+            PanelState {
+                view_mode: "columns".to_string(),
+                sort: PersistedSortConfig::default(),
+                last_path: Some(removed_root.to_string()),
+                expanded_paths: vec![],
+                column_paths: vec![],
+            },
+        );
+
+        let mut state = PersistedAppState {
+            window: None,
+            active_panel: fav_panel.clone(),
+            panels,
+            custom_favorites: vec![FavoriteFolder {
+                name: "Projects".to_string(),
+                path: fav_root.to_string(),
+            }],
+        };
+
+        state.sanitize();
+        assert_eq!(state.active_panel, fav_panel);
+        assert!(state.panels.contains_key(&fav_panel));
+        assert!(!state.panels.contains_key(&removed_panel));
+        assert_eq!(
+            state.panels.get(&fav_panel).unwrap().last_path.as_deref(),
+            Some(fav_sub)
+        );
+
+        // Outside last_path resets to favorite root
+        state.panels.get_mut(&fav_panel).unwrap().last_path = Some(outside.to_string());
+        state.sanitize();
+        assert_eq!(
+            state.panels.get(&fav_panel).unwrap().last_path.as_deref(),
+            Some(fav_root)
+        );
+        assert!(state.panels.get(&fav_panel).unwrap().expanded_paths.is_empty());
+
+        // Removing the favorite prunes its panel state and resets active_panel to home
+        state.custom_favorites.clear();
+        state.sanitize();
+        assert_eq!(state.active_panel, "home");
+        assert!(!state.panels.contains_key(&fav_panel));
     }
 
     #[test]

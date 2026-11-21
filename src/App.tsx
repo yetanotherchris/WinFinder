@@ -27,6 +27,7 @@ import {
   resolveViewAnchorChain,
 } from "./utils/pathChain";
 import type {
+  CustomFavoritePanelId,
   DirectoryListing,
   FavoriteFolder,
   FileEntry,
@@ -55,8 +56,16 @@ const TRACKED_PANEL_SET = new Set<PanelId>([
   "home",
 ]);
 
+function isCustomFavoritePanel(panel: PanelId): panel is CustomFavoritePanelId {
+  return (
+    panel.startsWith("fav:") &&
+    panel.slice(4).trim().length > 0 &&
+    !panel.slice(4).trim().startsWith("virtual://")
+  );
+}
+
 function isTrackedPanel(panel: PanelId): panel is TrackedPanelId {
-  return TRACKED_PANEL_SET.has(panel);
+  return TRACKED_PANEL_SET.has(panel) || isCustomFavoritePanel(panel);
 }
 
 function getRootPathForPanel(
@@ -366,17 +375,43 @@ export const App: React.FC = () => {
       if (next.length === customFavoritesRef.current.length) return;
       customFavoritesRef.current = next;
       setCustomFavorites(next);
-      persistCustomFavorites(next);
 
+      // Prune saved panel state for the removed custom favorite
+      const nextPanelStates: Partial<Record<TrackedPanelId, PanelState>> = {};
+      for (const [panelKey, state] of Object.entries(
+        panelStatesRef.current
+      ) as Array<[TrackedPanelId, PanelState | undefined]>) {
+        if (
+          !state ||
+          (panelKey.startsWith("fav:") &&
+            normalizePathKey(panelKey.slice(4)) === targetKey)
+        ) {
+          continue;
+        }
+        nextPanelStates[panelKey] = state;
+      }
+      panelStatesRef.current = nextPanelStates;
+
+      let activeWasRemoved = false;
       if (
         activePanelRef.current.startsWith("fav:") &&
         normalizePathKey(activePanelRef.current.slice(4)) === targetKey
       ) {
+        activeWasRemoved = true;
         activePanelRef.current = "home";
         setActivePanel("home");
       }
+      if (
+        lastTrackedPanelRef.current.startsWith("fav:") &&
+        normalizePathKey(lastTrackedPanelRef.current.slice(4)) === targetKey
+      ) {
+        lastTrackedPanelRef.current = "home";
+      }
+
+      persistCustomFavorites(next);
+      persistPanelStates(activeWasRemoved ? "home" : undefined);
     },
-    [persistCustomFavorites]
+    [persistCustomFavorites, persistPanelStates]
   );
 
   // Pointer-event-based in-app folder drag-and-drop into Favorites (WebView2 compatible)
@@ -788,6 +823,27 @@ export const App: React.FC = () => {
         persisted?.activePanel && isTrackedPanel(persisted.activePanel)
           ? persisted.activePanel
           : "home";
+      if (isCustomFavoritePanel(initialPanel)) {
+        const favKey = normalizePathKey(initialPanel.slice(4));
+        const matchedFav = initialFavorites.find(
+          (fav) => normalizePathKey(fav.path) === favKey
+        );
+        if (!matchedFav) {
+          initialPanel = "home";
+        } else {
+          let favRootExists = true;
+          if (isTauriRuntime()) {
+            try {
+              favRootExists = await invoke<boolean>("check_directory_exists", {
+                path: matchedFav.path,
+              });
+            } catch {
+              favRootExists = false;
+            }
+          }
+          initialPanel = favRootExists ? (`fav:${matchedFav.path}` as CustomFavoritePanelId) : "home";
+        }
+      }
       let rootPath = getRootPathForPanel(initialPanel, resolvedLocations);
       if (rootPath === null) {
         initialPanel = "home";
