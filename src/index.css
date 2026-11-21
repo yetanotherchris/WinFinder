@@ -1781,11 +1781,142 @@ body.is-dragging-folder-blocked * {
   color: var(--text-primary);
 }
 
+.settings-tabs {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 18px;
+  background: rgba(246, 246, 248, 0.96);
+  border-bottom: 1px solid var(--border-hairline);
+}
+
+.settings-tab-btn {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  min-width: 72px;
+  padding: 6px 12px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: default;
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+
+.settings-tab-btn:hover {
+  background: rgba(0, 0, 0, 0.045);
+  color: var(--text-primary);
+}
+
+.settings-tab-btn.is-active {
+  background: rgba(0, 0, 0, 0.08);
+  color: var(--accent-blue);
+}
+
+.settings-tab-btn:focus-visible {
+  outline: 2px solid var(--accent-blue);
+  outline-offset: 1px;
+}
+
 .settings-dialog-body {
   padding: 16px 18px 18px;
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.settings-sidebar-body {
+  gap: 10px;
+}
+
+.settings-sidebar-intro-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 2px;
+}
+
+.settings-sidebar-intro {
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+
+.settings-reset-link {
+  border: none;
+  background: transparent;
+  padding: 2px 6px;
+  border-radius: 5px;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--accent-blue);
+  cursor: default;
+  transition: background-color 0.1s ease;
+}
+
+.settings-reset-link:hover {
+  background: rgba(0, 99, 225, 0.08);
+}
+
+.settings-sidebar-group {
+  padding: 4px 0;
+}
+
+.settings-sidebar-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 6px 14px;
+  font-size: 13px;
+  color: var(--text-primary);
+  cursor: default;
+  user-select: none;
+  transition: background-color 0.08s ease;
+}
+
+.settings-sidebar-item:hover:not(.is-disabled) {
+  background: rgba(0, 0, 0, 0.03);
+}
+
+.settings-sidebar-item.is-disabled {
+  opacity: 0.5;
+}
+
+.settings-sidebar-item-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
+.settings-sidebar-item-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-sidebar-item-note {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.macos-checkbox {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--accent-blue);
+  flex-shrink: 0;
+  cursor: default;
 }
 
 .settings-section-label {

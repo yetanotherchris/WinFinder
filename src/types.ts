@@ -95,8 +95,21 @@ export interface PanelState {
   columnPaths: string[];
 }
 
+export interface SidebarVisibilitySettings {
+  recents: boolean;
+  applications: boolean;
+  desktop: boolean;
+  documents: boolean;
+  downloads: boolean;
+  home: boolean;
+  drives: boolean;
+  network: boolean;
+  trash: boolean;
+}
+
 export interface AppSettings {
   useWindowsWindowControls: boolean;
+  sidebarVisibility: SidebarVisibilitySettings;
 }
 
 export interface PersistedAppState {

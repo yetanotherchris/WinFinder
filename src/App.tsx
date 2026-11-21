@@ -27,6 +27,10 @@ import {
   buildDescendantChain,
   resolveViewAnchorChain,
 } from "./utils/pathChain";
+import {
+  DEFAULT_SIDEBAR_VISIBILITY,
+  normalizeSidebarVisibility,
+} from "./utils/sidebarVisibility";
 import type {
   AppSettings,
   BitlockerNotice,
@@ -58,6 +62,7 @@ function parseBitlockerLockedDrive(err: unknown): string | null {
 
 const DEFAULT_SETTINGS: AppSettings = {
   useWindowsWindowControls: false,
+  sidebarVisibility: DEFAULT_SIDEBAR_VISIBILITY,
 };
 
 const DEFAULT_VIEW_MODE: ViewMode = "icons";
@@ -128,6 +133,7 @@ function loadBrowserSettings(): AppSettings {
     const parsed = JSON.parse(raw);
     return {
       useWindowsWindowControls: Boolean(parsed?.useWindowsWindowControls),
+      sidebarVisibility: normalizeSidebarVisibility(parsed?.sidebarVisibility),
     };
   } catch {
     return DEFAULT_SETTINGS;
@@ -904,6 +910,9 @@ export const App: React.FC = () => {
         ? {
             useWindowsWindowControls: Boolean(
               persisted?.settings?.useWindowsWindowControls
+            ),
+            sidebarVisibility: normalizeSidebarVisibility(
+              persisted?.settings?.sidebarVisibility
             ),
           }
         : loadBrowserSettings();
@@ -2016,6 +2025,7 @@ export const App: React.FC = () => {
         locations={locations}
         activePanel={activePanel}
         customFavorites={customFavorites}
+        visibility={settings.sidebarVisibility}
         inAppDropState={inAppDrag?.dropState ?? "none"}
         osDragOverFavorites={osDragOverFavorites}
         favoritesSectionRef={favoritesSectionRef}
@@ -2157,6 +2167,7 @@ export const App: React.FC = () => {
       {settingsOpen && (
         <SettingsDialog
           settings={settings}
+          locations={locations}
           onChange={handleUpdateSettings}
           onClose={() => setSettingsOpen(false)}
         />
