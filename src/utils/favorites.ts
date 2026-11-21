@@ -22,6 +22,42 @@ export function normalizePathKey(raw: string): string {
   return canonical;
 }
 
+function normalizeForSubtreeCheck(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return "";
+  if (trimmed.startsWith("virtual://")) {
+    return trimmed.toLowerCase();
+  }
+  const slashed = trimmed.replace(/\\/g, "/");
+  const stripped = slashed.replace(/\/+$/, "");
+  let canonical: string;
+  if (!stripped) {
+    canonical = "/";
+  } else if (/^[A-Za-z]:$/.test(stripped)) {
+    canonical = `${stripped}/`;
+  } else {
+    canonical = stripped;
+  }
+
+  // Case-insensitive comparison for Windows paths
+  if (/^[A-Za-z]:/.test(canonical) || raw.includes("\\")) {
+    return canonical.toLowerCase();
+  }
+  return canonical;
+}
+
+export function isPathWithinRoot(path: string, rootPath: string): boolean {
+  const normPath = normalizeForSubtreeCheck(path);
+  const normRoot = normalizeForSubtreeCheck(rootPath);
+  if (!normPath || !normRoot) return false;
+  if (normRoot.startsWith("virtual://")) {
+    return normPath === normRoot;
+  }
+  if (normPath === normRoot) return true;
+  const prefix = normRoot.endsWith("/") ? normRoot : `${normRoot}/`;
+  return normPath.startsWith(prefix);
+}
+
 export function countBuiltInFavorites(locations: SidebarLocations | null): number {
   // Always present: Recents, Applications, Home
   let count = 3;

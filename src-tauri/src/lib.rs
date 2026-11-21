@@ -35,6 +35,55 @@ fn normalize_path_key(raw: &str) -> String {
     }
 }
 
+fn normalize_for_subtree_check(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if trimmed.starts_with("virtual://") {
+        return trimmed.to_lowercase();
+    }
+    let slashed = trimmed.replace('\\', "/");
+    let stripped = slashed.trim_end_matches('/');
+    let canonical = if stripped.is_empty() {
+        "/".to_string()
+    } else if stripped.len() == 2 && stripped.as_bytes()[1] == b':' {
+        format!("{}/", stripped)
+    } else {
+        stripped.to_string()
+    };
+
+    #[cfg(target_os = "windows")]
+    {
+        canonical.to_lowercase()
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        canonical
+    }
+}
+
+fn is_path_within_root(path: &str, root: &str) -> bool {
+    let norm_path = normalize_for_subtree_check(path);
+    let norm_root = normalize_for_subtree_check(root);
+    if norm_path.is_empty() || norm_root.is_empty() {
+        return false;
+    }
+    if norm_root.starts_with("virtual://") {
+        return norm_path == norm_root;
+    }
+    if norm_path == norm_root {
+        return true;
+    }
+    if norm_root.ends_with('/') {
+        norm_path.starts_with(&norm_root)
+    } else {
+        norm_path.starts_with(&norm_root)
+            && norm_path.as_bytes().get(norm_root.len()) == Some(&b'/')
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FavoriteFolder {
@@ -359,11 +408,18 @@ fn resolve_existing_dir(saved_path: Option<&str>, root_path: &str) -> String {
 
     if let Some(raw) = saved_path {
         let trimmed = raw.trim();
-        if !trimmed.is_empty() && !trimmed.starts_with("virtual://") {
+        if !trimmed.is_empty()
+            && !trimmed.starts_with("virtual://")
+            && is_path_within_root(trimmed, root_path)
+        {
             let mut candidate = PathBuf::from(trimmed);
             loop {
+                let candidate_str = candidate.to_string_lossy();
+                if !is_path_within_root(&candidate_str, root_path) {
+                    break;
+                }
                 if candidate.is_dir() {
-                    return candidate.to_string_lossy().into_owned();
+                    return candidate_str.into_owned();
                 }
                 match candidate.parent() {
                     Some(parent) if parent != candidate.as_path() => {
@@ -2063,5 +2119,51 @@ mod tests {
                 ("Documents", "/Users/chris/Documents"),
             ]
         );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn is_path_within_root_windows_cases() {
+        let root = r"C:\Users\chris\Downloads";
+        assert!(is_path_within_root(r"C:\Users\chris\Downloads", root));
+        assert!(is_path_within_root(r"c:\users\chris\downloads\", root));
+        assert!(is_path_within_root(r"C:\Users\chris\Downloads\Sub\Deep", root));
+        assert!(is_path_within_root("C:/Users/chris/Downloads/Sub", root));
+        assert!(!is_path_within_root(r"C:\Users\chris\Downloads2", root));
+        assert!(!is_path_within_root(r"C:\Users\chris", root));
+        assert!(!is_path_within_root(r"C:\", root));
+        assert!(!is_path_within_root(r"D:\Users\chris\Downloads", root));
+        assert!(is_path_within_root(r"C:\Users", r"C:\"));
+        assert!(!is_path_within_root(r"D:\Users", r"C:\"));
+        assert!(is_path_within_root("virtual://recents", "virtual://recents"));
+        assert!(!is_path_within_root(r"C:\", "virtual://recents"));
+    }
+
+    #[test]
+    fn resolve_existing_dir_rejects_saved_path_outside_root() {
+        let base = std::env::temp_dir().join(format!(
+            "winfinder_test_root_reset_{}",
+            std::process::id()
+        ));
+        let root = base.join("downloads");
+        let sub = root.join("sub");
+        let outside = base.join("outside");
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&sub).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+
+        let root_str = root.to_string_lossy().into_owned();
+        let sub_str = sub.to_string_lossy().into_owned();
+        let outside_str = outside.to_string_lossy().into_owned();
+        let missing_sub_str = sub.join("deleted_child").to_string_lossy().into_owned();
+
+        // Out-of-root saved path resets to root
+        assert_eq!(resolve_existing_dir(Some(&outside_str), &root_str), root_str);
+        // Valid subfolder is preserved
+        assert_eq!(resolve_existing_dir(Some(&sub_str), &root_str), sub_str);
+        // Missing child inside root walks up to existing parent inside root
+        assert_eq!(resolve_existing_dir(Some(&missing_sub_str), &root_str), sub_str);
+
+        let _ = fs::remove_dir_all(&base);
     }
 }
