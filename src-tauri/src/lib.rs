@@ -285,6 +285,50 @@ impl PersistedAppState {
     }
 }
 
+fn config_file_path_for_home(home: &Path) -> PathBuf {
+    home.join(".winfinder").join("config.json")
+}
+
+/// Migrates a legacy `~/.winfinder` regular file to `~/.winfinder/config.json`.
+/// Returns `Some(state)` if a legacy file existed and parsed as valid `PersistedAppState`.
+fn migrate_legacy_config_file(home: &Path) -> Option<PersistedAppState> {
+    let legacy_path = home.join(".winfinder");
+    if !legacy_path.is_file() {
+        return None;
+    }
+
+    let raw = fs::read_to_string(&legacy_path).ok();
+    let parsed = raw
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<PersistedAppState>(s).ok());
+
+    let backup_path = home.join(".winfinder.legacy.tmp");
+    let _ = fs::remove_file(&backup_path);
+    if fs::rename(&legacy_path, &backup_path).is_err() {
+        return parsed;
+    }
+
+    if fs::create_dir_all(&legacy_path).is_err() {
+        // Roll back so the legacy file is not lost.
+        let _ = fs::rename(&backup_path, &legacy_path);
+        return parsed;
+    }
+
+    let target_path = config_file_path_for_home(home);
+    if parsed.is_some() {
+        if fs::rename(&backup_path, &target_path).is_err() {
+            if let Some(raw_str) = raw {
+                let _ = fs::write(&target_path, raw_str);
+            }
+            let _ = fs::remove_file(&backup_path);
+        }
+    } else {
+        let _ = fs::remove_file(&backup_path);
+    }
+
+    parsed
+}
+
 struct AppStateStore {
     state_path: Option<PathBuf>,
     state: Mutex<PersistedAppState>,
@@ -293,21 +337,34 @@ struct AppStateStore {
 }
 
 impl AppStateStore {
-    fn load() -> Arc<Self> {
-        let state_path = dirs::home_dir().map(|h| h.join(".winfinder"));
-        let mut initial = state_path
-            .as_ref()
-            .and_then(|p| fs::read_to_string(p).ok())
-            .and_then(|raw| serde_json::from_str::<PersistedAppState>(&raw).ok())
-            .unwrap_or_default();
+    fn from_home(home: Option<PathBuf>) -> Self {
+        let (state_path, mut initial) = match home {
+            Some(home_dir) => {
+                let migrated = migrate_legacy_config_file(&home_dir);
+                let config_path = config_file_path_for_home(&home_dir);
+                let loaded = migrated
+                    .or_else(|| {
+                        fs::read_to_string(&config_path)
+                            .ok()
+                            .and_then(|raw| serde_json::from_str::<PersistedAppState>(&raw).ok())
+                    })
+                    .unwrap_or_default();
+                (Some(config_path), loaded)
+            }
+            None => (None, PersistedAppState::default()),
+        };
         initial.sanitize();
 
-        let store = Arc::new(Self {
+        Self {
             state_path,
             state: Mutex::new(initial),
             dirty: Mutex::new(false),
             dirty_cv: Condvar::new(),
-        });
+        }
+    }
+
+    fn load() -> Arc<Self> {
+        let store = Arc::new(Self::from_home(dirs::home_dir()));
         store.start_debounced_writer();
         store
     }
@@ -323,7 +380,7 @@ impl AppStateStore {
                 }
                 drop(dirty);
 
-                // Batch dirty state changes and flush to ~/.winfinder every 5 seconds
+                // Batch dirty state changes and flush to ~/.winfinder/config.json every 5 seconds
                 std::thread::sleep(flush_interval);
 
                 let mut dirty = store.dirty.lock().unwrap();
@@ -350,7 +407,15 @@ impl AppStateStore {
         let Ok(json) = serde_json::to_string_pretty(&snapshot) else {
             return;
         };
-        let tmp_path = path.with_file_name(".winfinder.tmp");
+        if let Some(parent) = path.parent() {
+            if parent.is_file() {
+                let _ = fs::remove_file(parent);
+            }
+            if fs::create_dir_all(parent).is_err() {
+                return;
+            }
+        }
+        let tmp_path = path.with_file_name("config.json.tmp");
         if fs::write(&tmp_path, &json).is_ok() {
             if fs::rename(&tmp_path, path).is_ok() {
                 return;
@@ -3204,6 +3269,7 @@ mod tests {
                 name: "Projects".to_string(),
                 path: fav_root.to_string(),
             }],
+            settings: AppSettings::default(),
         };
 
         state.sanitize();
@@ -3291,5 +3357,101 @@ mod tests {
         assert!(resolve_user_path("   \"\"   ", None).is_err());
 
         let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn config_store_creates_dot_winfinder_dir_and_saves_config_json() {
+        let unique = format!(
+            "winfinder_config_fresh_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let fake_home = std::env::temp_dir().join(unique);
+        let _ = fs::remove_dir_all(&fake_home);
+        fs::create_dir_all(&fake_home).unwrap();
+
+        let store = AppStateStore::from_home(Some(fake_home.clone()));
+        assert_eq!(
+            store.state_path.as_deref(),
+            Some(fake_home.join(".winfinder").join("config.json").as_path())
+        );
+
+        store.update_settings(AppSettings {
+            use_windows_window_controls: true,
+        });
+
+        let config_path = fake_home.join(".winfinder").join("config.json");
+        assert!(fake_home.join(".winfinder").is_dir());
+        assert!(config_path.is_file());
+
+        let reloaded = AppStateStore::from_home(Some(fake_home.clone()));
+        assert!(reloaded.snapshot().settings.use_windows_window_controls);
+
+        let _ = fs::remove_dir_all(&fake_home);
+    }
+
+    #[test]
+    fn config_store_migrates_legacy_dot_winfinder_file() {
+        let unique = format!(
+            "winfinder_config_migrate_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let fake_home = std::env::temp_dir().join(unique);
+        let _ = fs::remove_dir_all(&fake_home);
+        fs::create_dir_all(&fake_home).unwrap();
+
+        let legacy_file = fake_home.join(".winfinder");
+        let legacy_json = r#"{"activePanel":"documents","panels":{},"settings":{"useWindowsWindowControls":true}}"#;
+        fs::write(&legacy_file, legacy_json).unwrap();
+
+        let store = AppStateStore::from_home(Some(fake_home.clone()));
+        let snap = store.snapshot();
+        assert_eq!(snap.active_panel, "documents");
+        assert!(snap.settings.use_windows_window_controls);
+        assert!(fake_home.join(".winfinder").is_dir());
+        assert!(fake_home.join(".winfinder").join("config.json").is_file());
+        assert!(!fake_home.join(".winfinder.legacy.tmp").exists());
+
+        let _ = fs::remove_dir_all(&fake_home);
+    }
+
+    #[test]
+    fn config_store_handles_corrupt_legacy_dot_winfinder_file() {
+        let unique = format!(
+            "winfinder_config_corrupt_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let fake_home = std::env::temp_dir().join(unique);
+        let _ = fs::remove_dir_all(&fake_home);
+        fs::create_dir_all(&fake_home).unwrap();
+
+        let legacy_file = fake_home.join(".winfinder");
+        fs::write(&legacy_file, "{ not valid json").unwrap();
+
+        let store = AppStateStore::from_home(Some(fake_home.clone()));
+        let snap = store.snapshot();
+        assert_eq!(snap.active_panel, "home");
+        assert!(!snap.settings.use_windows_window_controls);
+        assert!(fake_home.join(".winfinder").is_dir());
+        assert!(!fake_home.join(".winfinder.legacy.tmp").exists());
+
+        // Subsequent save succeeds into ~/.winfinder/config.json
+        store.update_settings(AppSettings {
+            use_windows_window_controls: true,
+        });
+        assert!(fake_home.join(".winfinder").join("config.json").is_file());
+
+        let _ = fs::remove_dir_all(&fake_home);
     }
 }

@@ -50,6 +50,11 @@ if (-not $manifest.shortcuts) {
     throw "Scoop manifest has no 'shortcuts' declaration; refusing to write a definition that lost the Start Menu shortcut."
 }
 
+# Guard: never silently drop the Scoop post_uninstall config cleanup hook.
+if (-not $manifest.post_uninstall) {
+    throw "Scoop manifest has no 'post_uninstall' declaration; refusing to write a definition that lost config cleanup on uninstall."
+}
+
 $manifest.version = $Version
 $manifest.architecture."64bit".url = $url
 $manifest.architecture."64bit".hash = $hash

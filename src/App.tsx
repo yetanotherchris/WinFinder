@@ -1439,7 +1439,7 @@ export const App: React.FC = () => {
           });
         }
       } else {
-        // Excluded panels ("applications", "drives", "network"): keep session-only view/sort, never persist to ~/.winfinder
+        // Excluded panels ("applications", "drives", "network"): keep session-only view/sort, never persist to ~/.winfinder/config.json
         const ephemeral = ephemeralPanelStatesRef.current[panel];
         const nextViewMode = ephemeral?.viewMode ?? DEFAULT_VIEW_MODE;
         const nextSort = ephemeral?.sort ?? DEFAULT_SORT;
