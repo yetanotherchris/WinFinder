@@ -60,6 +60,7 @@ export const App: React.FC = () => {
   const [selectedEntry, setSelectedEntry] = useState<FileEntry | null>(null);
   const [sidebarWidth, setSidebarWidth] = useState<number>(204);
   const [viewMode, setViewMode] = useState<ViewMode>("icons");
+  const [showHidden, setShowHidden] = useState<boolean>(false);
   const [sortConfig, setSortConfig] = useState<SortConfig>({
     field: "name",
     direction: "asc",
@@ -68,42 +69,49 @@ export const App: React.FC = () => {
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
   const requestIdRef = useRef(0);
+  const showHiddenRef = useRef(showHidden);
+  showHiddenRef.current = showHidden;
 
-  const fetchDirectory = useCallback(async (targetPath?: string): Promise<DirectoryListing | null> => {
-    const reqId = ++requestIdRef.current;
-    setLoading(true);
-    setError(null);
-    setSelectedEntry(null);
-    setPendingPath(targetPath ?? "");
+  const fetchDirectory = useCallback(
+    async (targetPath?: string, overrideShowHidden?: boolean): Promise<DirectoryListing | null> => {
+      const reqId = ++requestIdRef.current;
+      const includeHidden = overrideShowHidden ?? showHiddenRef.current;
+      setLoading(true);
+      setError(null);
+      setSelectedEntry(null);
+      setPendingPath(targetPath ?? "");
 
-    if (!isTauriRuntime()) {
-      setListing(MOCK_PREVIEW_LISTING);
-      setPendingPath(null);
-      setLoading(false);
-      return MOCK_PREVIEW_LISTING;
-    }
+      if (!isTauriRuntime()) {
+        setListing(MOCK_PREVIEW_LISTING);
+        setPendingPath(null);
+        setLoading(false);
+        return MOCK_PREVIEW_LISTING;
+      }
 
-    try {
-      const result = await invoke<DirectoryListing>("list_directory", {
-        path: targetPath ?? null,
-      });
-      if (reqId !== requestIdRef.current) {
+      try {
+        const result = await invoke<DirectoryListing>("list_directory", {
+          path: targetPath ?? null,
+          showHidden: includeHidden,
+        });
+        if (reqId !== requestIdRef.current) {
+          return null;
+        }
+        setListing(result);
+        setPendingPath(null);
+        setLoading(false);
+        return result;
+      } catch (err) {
+        if (reqId !== requestIdRef.current) {
+          return null;
+        }
+        setError(typeof err === "string" ? err : String(err));
+        setPendingPath(null);
+        setLoading(false);
         return null;
       }
-      setListing(result);
-      setPendingPath(null);
-      setLoading(false);
-      return result;
-    } catch (err) {
-      if (reqId !== requestIdRef.current) {
-        return null;
-      }
-      setError(typeof err === "string" ? err : String(err));
-      setPendingPath(null);
-      setLoading(false);
-      return null;
-    }
-  }, []);
+    },
+    []
+  );
 
   // Initial load: resolve sidebar locations & open ~/
   useEffect(() => {
@@ -205,14 +213,78 @@ export const App: React.FC = () => {
     }
   }, []);
 
-  const handleRevealInExplorer = useCallback(async (entry: FileEntry) => {
-    if (!isTauriRuntime()) return;
+  const handleNewFolder = useCallback(async () => {
+    if (!isTauriRuntime() || !listing || listing.currentPath.startsWith("virtual://")) return;
     try {
-      await invoke("reveal_in_file_manager", { path: entry.path });
+      const createdPath = await invoke<string>("create_new_folder", {
+        parentPath: listing.currentPath,
+      });
+      const refreshed = await fetchDirectory(listing.currentPath);
+      if (refreshed) {
+        const createdEntry = refreshed.entries.find(
+          (e) => e.path.toLowerCase() === createdPath.toLowerCase()
+        );
+        if (createdEntry) {
+          setSelectedEntry(createdEntry);
+        }
+      }
     } catch (err) {
       setError(typeof err === "string" ? err : String(err));
     }
-  }, []);
+  }, [fetchDirectory, listing]);
+
+  const handleToggleShowHidden = useCallback(() => {
+    const next = !showHiddenRef.current;
+    setShowHidden(next);
+    if (listing) {
+      void fetchDirectory(listing.currentPath, next);
+    }
+  }, [fetchDirectory, listing]);
+
+  const handleOpenInTerminal = useCallback(async () => {
+    if (!isTauriRuntime() || !listing || listing.currentPath.startsWith("virtual://")) return;
+    try {
+      await invoke("open_in_terminal", { path: listing.currentPath });
+    } catch (err) {
+      setError(typeof err === "string" ? err : String(err));
+    }
+  }, [listing]);
+
+  const handleCopyCurrentPath = useCallback(async () => {
+    if (!listing || listing.currentPath.startsWith("virtual://")) return;
+    try {
+      await navigator.clipboard.writeText(listing.currentPath);
+    } catch {
+      // Clipboard API unavailable
+    }
+  }, [listing]);
+
+  const handleShowInExplorer = useCallback(async () => {
+    if (!isTauriRuntime() || !listing || listing.currentPath.startsWith("virtual://")) return;
+    try {
+      const hasRealSelection = Boolean(
+        selectedEntry &&
+          selectedEntry.entryKind !== "app" &&
+          selectedEntry.entryKind !== "drive" &&
+          !selectedEntry.path.startsWith("virtual://")
+      );
+      if (hasRealSelection && selectedEntry) {
+        await invoke("reveal_in_file_manager", { path: selectedEntry.path, select: true });
+      } else {
+        await invoke("reveal_in_file_manager", { path: listing.currentPath, select: false });
+      }
+    } catch (err) {
+      setError(typeof err === "string" ? err : String(err));
+    }
+  }, [listing, selectedEntry]);
+
+  const handleRefresh = useCallback(() => {
+    if (listing) {
+      void fetchDirectory(listing.currentPath);
+    } else {
+      void fetchDirectory();
+    }
+  }, [fetchDirectory, listing]);
 
   const handleBack = useCallback(async () => {
     if (historyIndex <= 0) return;
@@ -292,10 +364,12 @@ export const App: React.FC = () => {
       <div className="finder-content-column">
         <Toolbar
           title={displayTitle}
+          currentPath={activePath}
           canGoBack={historyIndex > 0}
           canGoForward={historyIndex < history.length - 1}
           viewMode={viewMode}
           sortConfig={sortConfig}
+          showHidden={showHidden}
           selectedEntry={selectedEntry}
           onBack={() => void handleBack()}
           onForward={() => void handleForward()}
@@ -304,7 +378,12 @@ export const App: React.FC = () => {
           onShareWithOs={(entry) => void handleShareWithOs(entry)}
           onCopyFile={(entry) => void handleCopyFile(entry)}
           onCopyPath={(entry) => void handleCopyPath(entry)}
-          onRevealInExplorer={(entry) => void handleRevealInExplorer(entry)}
+          onNewFolder={() => void handleNewFolder()}
+          onToggleShowHidden={handleToggleShowHidden}
+          onOpenInTerminal={() => void handleOpenInTerminal()}
+          onCopyCurrentPath={() => void handleCopyCurrentPath()}
+          onShowInExplorer={() => void handleShowInExplorer()}
+          onRefresh={handleRefresh}
         />
 
         <MainView
@@ -319,6 +398,7 @@ export const App: React.FC = () => {
           selectedPath={selectedEntry?.path ?? null}
           viewMode={viewMode}
           sortConfig={sortConfig}
+          showHidden={showHidden}
           loading={loading}
           loadingMessage={loadingMessage}
           error={error}

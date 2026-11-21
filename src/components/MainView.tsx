@@ -36,6 +36,7 @@ interface MainViewProps {
   selectedPath: string | null;
   viewMode: ViewMode;
   sortConfig: SortConfig;
+  showHidden: boolean;
   loading: boolean;
   loadingMessage?: string;
   error: string | null;
@@ -95,6 +96,7 @@ export const MainView: React.FC<MainViewProps> = ({
   selectedPath,
   viewMode,
   sortConfig,
+  showHidden,
   loading,
   loadingMessage,
   error,
@@ -129,12 +131,12 @@ export const MainView: React.FC<MainViewProps> = ({
   // List View inline folder disclosure state
   const [expandedFolders, setExpandedFolders] = useState<Record<string, ExpandedFolderState>>({});
 
-  // Reset sub-columns & expanded folders when root location or view mode changes
+  // Reset sub-columns & expanded folders when root location, view mode, or hidden visibility changes
   useEffect(() => {
     setSubColumns([]);
     setColumnPreview(null);
     setExpandedFolders({});
-  }, [currentPath, viewMode]);
+  }, [currentPath, viewMode, showHidden]);
 
   const toggleExpandFolder = async (folderPath: string) => {
     if (expandedFolders[folderPath]) {
@@ -162,6 +164,7 @@ export const MainView: React.FC<MainViewProps> = ({
     try {
       const result = await invoke<DirectoryListing>("list_directory", {
         path: folderPath,
+        showHidden,
       });
       setExpandedFolders((prev) => {
         if (!prev[folderPath]) return prev;
@@ -429,6 +432,7 @@ export const MainView: React.FC<MainViewProps> = ({
     try {
       const result = await invoke<DirectoryListing>("list_directory", {
         path: entry.path,
+        showHidden,
       });
       if (reqId !== columnReqIdRef.current) return;
       setSubColumns((prev) => {

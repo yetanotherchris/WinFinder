@@ -15,16 +15,21 @@ import {
   Copy,
   Link,
   FolderOpen,
+  FolderPlus,
+  Terminal,
+  RefreshCw,
   Share2,
 } from "lucide-react";
 import type { FileEntry, SortConfig, SortField, ViewMode } from "../types";
 
 interface ToolbarProps {
   title: string;
+  currentPath: string;
   canGoBack: boolean;
   canGoForward: boolean;
   viewMode: ViewMode;
   sortConfig: SortConfig;
+  showHidden: boolean;
   selectedEntry: FileEntry | null;
   onBack: () => void;
   onForward: () => void;
@@ -33,7 +38,12 @@ interface ToolbarProps {
   onShareWithOs: (entry: FileEntry) => void;
   onCopyFile: (entry: FileEntry) => void;
   onCopyPath: (entry: FileEntry) => void;
-  onRevealInExplorer: (entry: FileEntry) => void;
+  onNewFolder: () => void;
+  onToggleShowHidden: () => void;
+  onOpenInTerminal: () => void;
+  onCopyCurrentPath: () => void;
+  onShowInExplorer: () => void;
+  onRefresh: () => void;
 }
 
 const SORT_FIELDS: { field: SortField; label: string }[] = [
@@ -45,10 +55,12 @@ const SORT_FIELDS: { field: SortField; label: string }[] = [
 
 export const Toolbar: React.FC<ToolbarProps> = ({
   title,
+  currentPath,
   canGoBack,
   canGoForward,
   viewMode,
   sortConfig,
+  showHidden,
   selectedEntry,
   onBack,
   onForward,
@@ -57,15 +69,22 @@ export const Toolbar: React.FC<ToolbarProps> = ({
   onShareWithOs,
   onCopyFile,
   onCopyPath,
-  onRevealInExplorer,
+  onNewFolder,
+  onToggleShowHidden,
+  onOpenInTerminal,
+  onCopyCurrentPath,
+  onShowInExplorer,
+  onRefresh,
 }) => {
   const [sortMenuOpen, setSortMenuOpen] = useState(false);
   const [shareMenuOpen, setShareMenuOpen] = useState(false);
+  const [actionsMenuOpen, setActionsMenuOpen] = useState(false);
   const sortMenuRef = useRef<HTMLDivElement | null>(null);
   const shareMenuRef = useRef<HTMLDivElement | null>(null);
+  const actionsMenuRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    if (!sortMenuOpen && !shareMenuOpen) return;
+    if (!sortMenuOpen && !shareMenuOpen && !actionsMenuOpen) return;
     const handlePointerDown = (e: MouseEvent) => {
       if (sortMenuOpen && sortMenuRef.current && !sortMenuRef.current.contains(e.target as Node)) {
         setSortMenuOpen(false);
@@ -73,11 +92,15 @@ export const Toolbar: React.FC<ToolbarProps> = ({
       if (shareMenuOpen && shareMenuRef.current && !shareMenuRef.current.contains(e.target as Node)) {
         setShareMenuOpen(false);
       }
+      if (actionsMenuOpen && actionsMenuRef.current && !actionsMenuRef.current.contains(e.target as Node)) {
+        setActionsMenuOpen(false);
+      }
     };
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         setSortMenuOpen(false);
         setShareMenuOpen(false);
+        setActionsMenuOpen(false);
       }
     };
     window.addEventListener("mousedown", handlePointerDown);
@@ -86,7 +109,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
       window.removeEventListener("mousedown", handlePointerDown);
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [sortMenuOpen, shareMenuOpen]);
+  }, [sortMenuOpen, shareMenuOpen, actionsMenuOpen]);
 
   // Close share menu if selection disappears
   useEffect(() => {
@@ -95,6 +118,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
     }
   }, [selectedEntry]);
 
+  const isRealDirectory = Boolean(currentPath && !currentPath.startsWith("virtual://"));
   const isRealFsItem = Boolean(
     selectedEntry &&
       selectedEntry.entryKind !== "app" &&
@@ -202,7 +226,11 @@ export const Toolbar: React.FC<ToolbarProps> = ({
           <button
             type="button"
             className={`toolbar-btn toolbar-btn-chevron ${sortMenuOpen ? "open" : ""}`}
-            onClick={() => setSortMenuOpen((prev) => !prev)}
+            onClick={() => {
+              setShareMenuOpen(false);
+              setActionsMenuOpen(false);
+              setSortMenuOpen((prev) => !prev);
+            }}
             title="Sort items"
             aria-label="Sort items"
             aria-expanded={sortMenuOpen}
@@ -295,6 +323,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
             disabled={!isRealFsItem}
             onClick={() => {
               setSortMenuOpen(false);
+              setActionsMenuOpen(false);
               setShareMenuOpen((prev) => !prev);
             }}
             title={isRealFsItem ? "Share selected item" : "Select a file or folder to share"}
@@ -359,6 +388,114 @@ export const Toolbar: React.FC<ToolbarProps> = ({
                 </span>
                 <span>Copy Path</span>
               </button>
+            </div>
+          )}
+        </div>
+
+        {/* Action / More Popover Menu */}
+        <div className="sort-menu-wrapper" ref={actionsMenuRef}>
+          <button
+            type="button"
+            className={`toolbar-btn toolbar-btn-chevron ${actionsMenuOpen ? "open" : ""}`}
+            onClick={() => {
+              setSortMenuOpen(false);
+              setShareMenuOpen(false);
+              setActionsMenuOpen((prev) => !prev);
+            }}
+            title="Actions"
+            aria-label="More actions"
+            aria-expanded={actionsMenuOpen}
+            aria-haspopup="menu"
+          >
+            <CircleEllipsis size={16} strokeWidth={1.75} />
+            <ChevronDown size={11} strokeWidth={2} className="tiny-chevron" />
+          </button>
+
+          {actionsMenuOpen && (
+            <div className="sort-popover share-popover" role="menu" aria-label="Folder actions">
+              <button
+                type="button"
+                role="menuitem"
+                className="sort-menu-item"
+                disabled={!isRealDirectory}
+                onClick={() => {
+                  setActionsMenuOpen(false);
+                  onNewFolder();
+                }}
+              >
+                <span className="sort-check-slot">
+                  <FolderPlus size={13} strokeWidth={2} />
+                </span>
+                <span>New Folder</span>
+              </button>
+
+              <div className="sort-menu-sep" />
+
+              <button
+                type="button"
+                role="menuitemcheckbox"
+                aria-checked={showHidden}
+                className="sort-menu-item"
+                onClick={() => {
+                  setActionsMenuOpen(false);
+                  onToggleShowHidden();
+                }}
+              >
+                <span className="sort-check-slot">
+                  {showHidden && <Check size={13} strokeWidth={2.4} />}
+                </span>
+                <span>Show Hidden Files</span>
+              </button>
+
+              <div className="sort-menu-sep" />
+
+              <button
+                type="button"
+                role="menuitem"
+                className="sort-menu-item"
+                disabled={!isRealDirectory}
+                onClick={() => {
+                  setActionsMenuOpen(false);
+                  onOpenInTerminal();
+                }}
+              >
+                <span className="sort-check-slot">
+                  <Terminal size={13} strokeWidth={2} />
+                </span>
+                <span>Open in Terminal</span>
+              </button>
+
+              <button
+                type="button"
+                role="menuitem"
+                className="sort-menu-item"
+                disabled={!isRealDirectory}
+                onClick={() => {
+                  setActionsMenuOpen(false);
+                  onCopyCurrentPath();
+                }}
+              >
+                <span className="sort-check-slot">
+                  <Link size={13} strokeWidth={2} />
+                </span>
+                <span>Copy Current Folder Path</span>
+              </button>
+
+              <button
+                type="button"
+                role="menuitem"
+                className="sort-menu-item"
+                disabled={!isRealDirectory}
+                onClick={() => {
+                  setActionsMenuOpen(false);
+                  onShowInExplorer();
+                }}
+              >
+                <span className="sort-check-slot">
+                  <FolderOpen size={13} strokeWidth={2} />
+                </span>
+                <span>Show in File Explorer</span>
+              </button>
 
               <div className="sort-menu-sep" />
 
@@ -367,29 +504,18 @@ export const Toolbar: React.FC<ToolbarProps> = ({
                 role="menuitem"
                 className="sort-menu-item"
                 onClick={() => {
-                  setShareMenuOpen(false);
-                  onRevealInExplorer(selectedEntry);
+                  setActionsMenuOpen(false);
+                  onRefresh();
                 }}
               >
                 <span className="sort-check-slot">
-                  <FolderOpen size={13} strokeWidth={2} />
+                  <RefreshCw size={13} strokeWidth={2} />
                 </span>
-                <span>Show in File Explorer</span>
+                <span>Refresh</span>
               </button>
             </div>
           )}
         </div>
-
-        {/* Action / More */}
-        <button
-          type="button"
-          className="toolbar-btn toolbar-btn-chevron filler-btn"
-          title="Actions (prototype filler)"
-          aria-label="More actions"
-        >
-          <CircleEllipsis size={16} strokeWidth={1.75} />
-          <ChevronDown size={11} strokeWidth={2} className="tiny-chevron" />
-        </button>
 
         <div className="toolbar-spacer-sm" />
 

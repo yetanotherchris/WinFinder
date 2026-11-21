@@ -185,7 +185,7 @@ fn home_info() -> Result<(PathBuf, String, String), String> {
     Ok((home, home_path, home_name))
 }
 
-fn list_fs_directory(target: &Path) -> Result<DirectoryListing, String> {
+fn list_fs_directory(target: &Path, show_hidden: bool) -> Result<DirectoryListing, String> {
     let (home, home_path, home_name) = home_info()?;
 
     let read_dir =
@@ -201,7 +201,7 @@ fn list_fs_directory(target: &Path) -> Result<DirectoryListing, String> {
             Err(_) => continue,
         };
 
-        if is_hidden_entry(&name, &metadata) {
+        if !show_hidden && is_hidden_entry(&name, &metadata) {
             continue;
         }
 
@@ -254,7 +254,7 @@ fn list_fs_directory(target: &Path) -> Result<DirectoryListing, String> {
     })
 }
 
-fn list_recents() -> Result<DirectoryListing, String> {
+fn list_recents(show_hidden: bool) -> Result<DirectoryListing, String> {
     let (home, home_path, home_name) = home_info()?;
 
     let mut search_dirs: Vec<PathBuf> = vec![home.clone()];
@@ -284,7 +284,7 @@ fn list_recents() -> Result<DirectoryListing, String> {
             let Ok(metadata) = item.metadata() else {
                 continue;
             };
-            if metadata.is_dir() || is_hidden_entry(&name, &metadata) {
+            if metadata.is_dir() || (!show_hidden && is_hidden_entry(&name, &metadata)) {
                 continue;
             }
             let modified_ms = metadata
@@ -888,7 +888,7 @@ fn load_applications_entries() -> Result<Vec<FileEntry>, String> {
 
     #[cfg(target_os = "macos")]
     {
-        let listing = list_fs_directory(Path::new("/Applications"))?;
+        let listing = list_fs_directory(Path::new("/Applications"), false)?;
         Ok(listing
             .entries
             .into_iter()
@@ -945,7 +945,7 @@ fn list_computer() -> Result<DirectoryListing, String> {
 
     #[cfg(not(target_os = "windows"))]
     {
-        list_fs_directory(Path::new("/"))
+        list_fs_directory(Path::new("/"), false)
     }
 }
 
@@ -993,21 +993,23 @@ fn get_sidebar_locations() -> Result<SidebarLocations, String> {
 #[tauri::command]
 async fn list_directory(
     path: Option<String>,
+    show_hidden: Option<bool>,
     apps_cache: tauri::State<'_, Arc<AppsCache>>,
 ) -> Result<DirectoryListing, String> {
     let target = path.unwrap_or_default();
+    let include_hidden = show_hidden.unwrap_or(false);
     let cache = Arc::clone(apps_cache.inner());
 
     tauri::async_runtime::spawn_blocking(move || match target.as_str() {
         "" => {
             let (home, _, _) = home_info()?;
-            list_fs_directory(&home)
+            list_fs_directory(&home, include_hidden)
         }
-        "virtual://recents" => list_recents(),
+        "virtual://recents" => list_recents(include_hidden),
         "virtual://applications" => list_applications(&cache),
         "virtual://computer" => list_computer(),
         "virtual://network" => list_network(),
-        raw => list_fs_directory(Path::new(raw)),
+        raw => list_fs_directory(Path::new(raw), include_hidden),
     })
     .await
     .map_err(|e| format!("Failed to load location: {}", e))?
@@ -1110,15 +1112,21 @@ fn copy_file_to_clipboard(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn reveal_in_file_manager(path: String) -> Result<(), String> {
+fn reveal_in_file_manager(path: String, select: Option<bool>) -> Result<(), String> {
+    let should_select = select.unwrap_or(true);
+
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
         use std::process::Command;
         const CREATE_NO_WINDOW: u32 = 0x08000000;
-        Command::new("explorer.exe")
-            .arg(format!("/select,{}", path))
-            .creation_flags(CREATE_NO_WINDOW)
+        let mut cmd = Command::new("explorer.exe");
+        if should_select {
+            cmd.arg(format!("/select,{}", path));
+        } else {
+            cmd.arg(&path);
+        }
+        cmd.creation_flags(CREATE_NO_WINDOW)
             .spawn()
             .map_err(|e| format!("Failed to open File Explorer: {}", e))?;
         Ok(())
@@ -1126,22 +1134,102 @@ fn reveal_in_file_manager(path: String) -> Result<(), String> {
 
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("open")
-            .args(["-R", &path])
-            .spawn()
+        let mut cmd = std::process::Command::new("open");
+        if should_select {
+            cmd.args(["-R", &path]);
+        } else {
+            cmd.arg(&path);
+        }
+        cmd.spawn()
             .map_err(|e| format!("Failed to reveal in Finder: {}", e))?;
         Ok(())
     }
 
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
-        let parent = Path::new(&path)
-            .parent()
-            .unwrap_or_else(|| Path::new(&path));
+        let target = if should_select {
+            Path::new(&path)
+                .parent()
+                .unwrap_or_else(|| Path::new(&path))
+        } else {
+            Path::new(&path)
+        };
         std::process::Command::new("xdg-open")
-            .arg(parent)
+            .arg(target)
             .spawn()
             .map_err(|e| format!("Failed to open file manager: {}", e))?;
+        Ok(())
+    }
+}
+
+#[tauri::command]
+fn create_new_folder(parent_path: String) -> Result<String, String> {
+    let parent = Path::new(&parent_path);
+    if !parent.is_dir() {
+        return Err("Cannot create a folder in this location".to_string());
+    }
+
+    let mut candidate = parent.join("New folder");
+    let mut index = 2u32;
+    while candidate.exists() {
+        if index > 999 {
+            return Err("Too many folders named 'New folder' already exist".to_string());
+        }
+        candidate = parent.join(format!("New folder ({})", index));
+        index += 1;
+    }
+
+    fs::create_dir(&candidate).map_err(|e| format!("Failed to create folder: {}", e))?;
+    Ok(candidate.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+fn open_in_terminal(path: String) -> Result<(), String> {
+    let dir = Path::new(&path);
+    if !dir.is_dir() {
+        return Err("Cannot open terminal for this location".to_string());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        use std::process::Command;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+        // Prefer Windows Terminal if installed, otherwise fall back to PowerShell
+        if Command::new("wt.exe")
+            .args(["-d", &path])
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .is_ok()
+        {
+            return Ok(());
+        }
+
+        Command::new("cmd")
+            .args(["/C", "start", "powershell.exe", "-NoExit"])
+            .current_dir(dir)
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .map_err(|e| format!("Failed to open Terminal: {}", e))?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .args(["-a", "Terminal", &path])
+            .spawn()
+            .map_err(|e| format!("Failed to open Terminal: {}", e))?;
+        Ok(())
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        std::process::Command::new("x-terminal-emulator")
+            .current_dir(dir)
+            .spawn()
+            .map_err(|e| format!("Failed to open Terminal: {}", e))?;
         Ok(())
     }
 }
@@ -1192,6 +1280,8 @@ pub fn run() {
             show_context_menu,
             copy_file_to_clipboard,
             reveal_in_file_manager,
+            create_new_folder,
+            open_in_terminal,
             share_with_os
         ])
         .run(tauri::generate_context!())
