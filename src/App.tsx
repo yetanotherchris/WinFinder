@@ -162,6 +162,56 @@ const MOCK_PREVIEW_LISTING: DirectoryListing = {
   emptyMessage: null,
 };
 
+function isSameOrSubpath(targetKey: string, rootKey: string): boolean {
+  if (!rootKey) return false;
+  if (targetKey === rootKey) return true;
+  const sep =
+    rootKey.endsWith("\\") || rootKey.endsWith("/")
+      ? ""
+      : rootKey.includes("\\")
+        ? "\\"
+        : "/";
+  return targetKey.startsWith(`${rootKey}${sep}`);
+}
+
+function matchPanelForPath(
+  targetPath: string,
+  locs: SidebarLocations | null,
+  customFavorites: FavoriteFolder[]
+): PanelId {
+  const targetKey = normalizePathKey(targetPath);
+  const candidates: Array<{ panel: PanelId; key: string }> = [];
+
+  if (locs?.desktopPath) {
+    candidates.push({ panel: "desktop", key: normalizePathKey(locs.desktopPath) });
+  }
+  if (locs?.documentsPath) {
+    candidates.push({ panel: "documents", key: normalizePathKey(locs.documentsPath) });
+  }
+  if (locs?.downloadsPath) {
+    candidates.push({ panel: "downloads", key: normalizePathKey(locs.downloadsPath) });
+  }
+  for (const fav of customFavorites) {
+    candidates.push({ panel: `fav:${fav.path}`, key: normalizePathKey(fav.path) });
+  }
+  if (locs?.homePath) {
+    candidates.push({ panel: "home", key: normalizePathKey(locs.homePath) });
+  }
+
+  let best: { panel: PanelId; keyLen: number } | null = null;
+  for (const candidate of candidates) {
+    if (isSameOrSubpath(targetKey, candidate.key)) {
+      if (!best || candidate.key.length > best.keyLen) {
+        best = { panel: candidate.panel, keyLen: candidate.key.length };
+      }
+    }
+  }
+
+  if (best) return best.panel;
+  if (targetPath.startsWith("\\\\")) return "network";
+  return "drives";
+}
+
 function labelForPendingPath(targetPath?: string, locations?: SidebarLocations | null): string {
   if (!targetPath) return locations?.homeName || "Home";
   if (targetPath === "virtual://recents") return "Recents";
@@ -668,11 +718,13 @@ export const App: React.FC = () => {
     (async () => {
       let resolvedLocations: SidebarLocations | null = null;
       let persisted: PersistedAppState | null = null;
+      let cliInitialPath: string | null = null;
 
       if (isTauriRuntime()) {
-        const [locsResult, stateResult] = await Promise.allSettled([
+        const [locsResult, stateResult, initialPathResult] = await Promise.allSettled([
           invoke<SidebarLocations>("get_sidebar_locations"),
           invoke<PersistedAppState>("load_app_state"),
+          invoke<string | null>("get_initial_path"),
         ]);
         if (locsResult.status === "fulfilled") {
           resolvedLocations = locsResult.value;
@@ -680,6 +732,13 @@ export const App: React.FC = () => {
         }
         if (stateResult.status === "fulfilled") {
           persisted = stateResult.value;
+        }
+        if (
+          initialPathResult.status === "fulfilled" &&
+          typeof initialPathResult.value === "string" &&
+          initialPathResult.value.trim().length > 0
+        ) {
+          cliInitialPath = initialPathResult.value.trim();
         }
       } else {
         resolvedLocations = MOCK_LOCATIONS;
@@ -708,6 +767,49 @@ export const App: React.FC = () => {
       }
       customFavoritesRef.current = initialFavorites;
       setCustomFavorites(initialFavorites);
+
+      if (cliInitialPath) {
+        const matchedPanel = matchPanelForPath(
+          cliInitialPath,
+          resolvedLocations,
+          initialFavorites
+        );
+        const savedMatched = isTrackedPanel(matchedPanel)
+          ? panelStatesRef.current[matchedPanel]
+          : undefined;
+        const initialViewMode = savedMatched?.viewMode ?? DEFAULT_VIEW_MODE;
+        const initialSort = savedMatched?.sort ?? DEFAULT_SORT;
+
+        if (!active) return;
+
+        if (isTrackedPanel(matchedPanel)) {
+          lastTrackedPanelRef.current = matchedPanel;
+        } else if (persisted?.activePanel && isTrackedPanel(persisted.activePanel)) {
+          lastTrackedPanelRef.current = persisted.activePanel;
+        }
+        activePanelRef.current = matchedPanel;
+        setActivePanel(matchedPanel);
+        setViewMode(initialViewMode);
+        setSortConfig(initialSort);
+        setExpandedPaths([]);
+        setColumnPaths([]);
+
+        const data = await fetchDirectory(cliInitialPath);
+        if (active && data) {
+          setHistory([{ path: data.currentPath, panel: matchedPanel }]);
+          setHistoryIndex(0);
+          if (isTrackedPanel(matchedPanel)) {
+            updateTrackedPanelState(matchedPanel, {
+              viewMode: initialViewMode,
+              sort: initialSort,
+              lastPath: data.currentPath,
+              expandedPaths: [],
+              columnPaths: [],
+            });
+          }
+        }
+        return;
+      }
 
       let initialPanel: TrackedPanelId =
         persisted?.activePanel && isTrackedPanel(persisted.activePanel)
