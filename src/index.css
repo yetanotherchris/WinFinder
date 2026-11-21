@@ -499,6 +499,161 @@ body.is-resizing-col * {
   flex-direction: column;
 }
 
+/* ==================== TRASH HEADER PANEL & MODAL ==================== */
+.trash-header-panel {
+  height: 38px;
+  min-height: 38px;
+  padding: 0 14px;
+  background: #f5f5f7;
+  border-bottom: 1px solid var(--border-hairline);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.trash-header-info {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.trash-header-icon {
+  color: #7c7c82;
+  flex-shrink: 0;
+}
+
+.trash-header-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trash-empty-btn {
+  height: 24px;
+  padding: 0 12px;
+  border-radius: 6px;
+  border: 1px solid rgba(0, 0, 0, 0.14);
+  background: #ffffff;
+  color: var(--text-primary);
+  font-family: var(--font-system);
+  font-size: 12px;
+  font-weight: 500;
+  box-shadow: 0 0.5px 1px rgba(0, 0, 0, 0.06);
+  cursor: default;
+  flex-shrink: 0;
+  transition: background-color 0.1s ease, border-color 0.1s ease, color 0.1s ease;
+}
+
+.trash-empty-btn:hover:not(:disabled) {
+  background: #f0f0f3;
+  border-color: rgba(0, 0, 0, 0.18);
+}
+
+.trash-empty-btn:active:not(:disabled) {
+  background: #e5e5ea;
+}
+
+.trash-empty-btn:disabled {
+  background: rgba(255, 255, 255, 0.6);
+  border-color: rgba(0, 0, 0, 0.08);
+  color: #b4b4b9;
+  box-shadow: none;
+}
+
+.finder-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.24);
+  backdrop-filter: blur(2px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+}
+
+.finder-modal-dialog {
+  width: 320px;
+  max-width: calc(100% - 32px);
+  padding: 20px 20px 16px;
+  border-radius: 12px;
+  background: rgba(250, 250, 252, 0.98);
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.22), 0 2px 6px rgba(0, 0, 0, 0.1);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+}
+
+.finder-modal-icon {
+  width: 48px;
+  height: 48px;
+  border-radius: 12px;
+  background: rgba(255, 59, 48, 0.1);
+  color: #e03126;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 12px;
+}
+
+.finder-modal-title {
+  margin: 0 0 6px;
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--text-primary);
+}
+
+.finder-modal-desc {
+  margin: 0 0 18px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+}
+
+.finder-modal-actions {
+  width: 100%;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.finder-modal-btn {
+  flex: 1;
+  height: 28px;
+  padding: 0 12px;
+  border-radius: 6px;
+  font-family: var(--font-system);
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: default;
+}
+
+.finder-modal-btn.secondary {
+  border: 1px solid rgba(0, 0, 0, 0.14);
+  background: #ffffff;
+  color: var(--text-primary);
+}
+
+.finder-modal-btn.secondary:hover {
+  background: #f2f2f5;
+}
+
+.finder-modal-btn.destructive {
+  border: 1px solid #d92d20;
+  background: #ff3b30;
+  color: #ffffff;
+}
+
+.finder-modal-btn.destructive:hover {
+  background: #e63228;
+}
+
 .finder-canvas {
   flex: 1;
   min-height: 0;

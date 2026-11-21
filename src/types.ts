@@ -61,6 +61,7 @@ export type PanelId =
   | "home"
   | "drives"
   | "network"
+  | "trash"
   | CustomFavoritePanelId;
 
 export type TrackedPanelId =
