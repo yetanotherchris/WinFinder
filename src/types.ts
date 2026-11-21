@@ -45,6 +45,13 @@ export interface SidebarLocations {
   downloadsPath: string | null;
 }
 
+export interface FavoriteFolder {
+  name: string;
+  path: string;
+}
+
+export type CustomFavoritePanelId = `fav:${string}`;
+
 export type PanelId =
   | "recents"
   | "applications"
@@ -54,7 +61,8 @@ export type PanelId =
   | "home"
   | "drives"
   | "network"
-  | "trash";
+  | "trash"
+  | CustomFavoritePanelId;
 
 export type TrackedPanelId =
   | "recents"
@@ -74,4 +82,5 @@ export interface PanelState {
 export interface PersistedAppState {
   activePanel: TrackedPanelId;
   panels: Partial<Record<TrackedPanelId, PanelState>>;
+  customFavorites?: FavoriteFolder[];
 }

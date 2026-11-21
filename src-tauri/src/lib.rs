@@ -7,9 +7,39 @@ use std::time::{Duration, UNIX_EPOCH};
 use tauri::Manager;
 
 const TRACKED_PANELS: &[&str] = &["recents", "desktop", "documents", "downloads", "home"];
+const MAX_FAVORITES: usize = 10;
 
 fn is_tracked_panel(panel_id: &str) -> bool {
     TRACKED_PANELS.contains(&panel_id)
+}
+
+fn normalize_path_key(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let stripped = trimmed.trim_end_matches(|c| c == '/' || c == '\\');
+    let canonical = if stripped.is_empty() {
+        trimmed.to_string()
+    } else if stripped.len() == 2 && stripped.as_bytes()[1] == b':' {
+        format!("{}\\", stripped)
+    } else {
+        stripped.to_string()
+    };
+
+    #[cfg(target_os = "windows")]
+    {
+        canonical.to_lowercase()
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        canonical
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FavoriteFolder {
+    pub name: String,
+    pub path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,6 +110,7 @@ pub struct PersistedAppState {
     pub window: Option<WindowState>,
     pub active_panel: String,
     pub panels: BTreeMap<String, PanelState>,
+    pub custom_favorites: Vec<FavoriteFolder>,
 }
 
 impl Default for PersistedAppState {
@@ -88,6 +119,7 @@ impl Default for PersistedAppState {
             window: None,
             active_panel: "home".to_string(),
             panels: BTreeMap::new(),
+            custom_favorites: Vec::new(),
         }
     }
 }
@@ -115,6 +147,32 @@ impl PersistedAppState {
                 panel.sort.direction = "asc".to_string();
             }
         }
+
+        let mut seen = std::collections::HashSet::new();
+        let mut cleaned = Vec::new();
+        for fav in std::mem::take(&mut self.custom_favorites) {
+            let trimmed_path = fav.path.trim().to_string();
+            if trimmed_path.is_empty() || trimmed_path.starts_with("virtual://") {
+                continue;
+            }
+            let key = normalize_path_key(&trimmed_path);
+            if !seen.insert(key) {
+                continue;
+            }
+            let name = if fav.name.trim().is_empty() {
+                display_name_for_path(Path::new(&trimmed_path))
+            } else {
+                fav.name.trim().to_string()
+            };
+            cleaned.push(FavoriteFolder {
+                name,
+                path: trimmed_path,
+            });
+            if cleaned.len() >= MAX_FAVORITES {
+                break;
+            }
+        }
+        self.custom_favorites = cleaned;
     }
 }
 
@@ -230,6 +288,14 @@ impl AppStateStore {
         guard.sanitize();
         drop(guard);
         self.schedule_save();
+    }
+
+    fn update_custom_favorites(&self, favorites: Vec<FavoriteFolder>) {
+        let mut guard = self.state.lock().unwrap();
+        guard.custom_favorites = favorites;
+        guard.sanitize();
+        drop(guard);
+        self.save_now();
     }
 }
 
@@ -1784,6 +1850,48 @@ fn resolve_panel_path(saved_path: Option<String>, root_path: String) -> String {
 }
 
 #[tauri::command]
+fn save_custom_favorites(
+    favorites: Vec<FavoriteFolder>,
+    store: tauri::State<'_, Arc<AppStateStore>>,
+) {
+    store.update_custom_favorites(favorites);
+}
+
+#[tauri::command]
+fn check_directory_exists(path: String) -> bool {
+    let trimmed = path.trim();
+    if trimmed.is_empty() || trimmed.starts_with("virtual://") {
+        return false;
+    }
+    Path::new(trimmed).is_dir()
+}
+
+#[tauri::command]
+fn validate_favorite_dirs(paths: Vec<String>) -> Vec<FavoriteFolder> {
+    let mut seen = std::collections::HashSet::new();
+    let mut result = Vec::new();
+    for raw in paths {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() || trimmed.starts_with("virtual://") {
+            continue;
+        }
+        let p = Path::new(trimmed);
+        if !p.is_dir() {
+            continue;
+        }
+        let key = normalize_path_key(trimmed);
+        if !seen.insert(key) {
+            continue;
+        }
+        result.push(FavoriteFolder {
+            name: display_name_for_path(p),
+            path: trimmed.to_string(),
+        });
+    }
+    result
+}
+
+#[tauri::command]
 async fn empty_trash() -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(|| {
         #[cfg(target_os = "windows")]
@@ -1890,6 +1998,9 @@ pub fn run() {
             load_app_state,
             save_panel_states,
             resolve_panel_path,
+            save_custom_favorites,
+            check_directory_exists,
+            validate_favorite_dirs,
             empty_trash
         ])
         .run(tauri::generate_context!())
