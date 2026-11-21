@@ -1,7 +1,7 @@
 {
   "homepage": "https://github.com/yetanotherchris/WinFinder",
   "description": "A macOS Finder-inspired desktop file manager for Windows built with Tauri v2.",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "license": "MIT",
   "shortcuts": [
     [
@@ -11,8 +11,8 @@
   ],
   "architecture": {
     "64bit": {
-      "url": "https://github.com/yetanotherchris/WinFinder/releases/download/v0.0.3/winfinder-0.0.3-windows-x64.zip",
-      "hash": "20ea63437405bfeff4701bb2988e0515a66c6616798978d9fd815d14dd510fa1",
+      "url": "https://github.com/yetanotherchris/WinFinder/releases/download/v0.0.4/winfinder-0.0.4-windows-x64.zip",
+      "hash": "09ffc79bc619b86ac30415fdf6a2249f5c218496ef2622985185862ffff81163",
       "bin": [
         [
           "winfinder.exe",
