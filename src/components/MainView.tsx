@@ -11,6 +11,7 @@ import {
   HardDrive,
   Globe,
   Trash2,
+  Search,
 } from "lucide-react";
 import type {
   BreadcrumbItem,
@@ -70,6 +71,9 @@ interface MainViewProps {
   isTrashView?: boolean;
   emptyingTrash?: boolean;
   onEmptyTrash?: () => void;
+  searchQuery?: string | null;
+  searchScopeName?: string | null;
+  onClearSearch?: () => void;
 }
 
 interface MillerColumn {
@@ -146,6 +150,9 @@ export const MainView: React.FC<MainViewProps> = ({
   isTrashView = false,
   emptyingTrash = false,
   onEmptyTrash,
+  searchQuery = null,
+  searchScopeName = null,
+  onClearSearch,
 }) => {
   const [confirmEmptyOpen, setConfirmEmptyOpen] = useState(false);
 
@@ -555,6 +562,14 @@ export const MainView: React.FC<MainViewProps> = ({
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.altKey || e.ctrlKey || e.metaKey) return;
       if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+      const target = e.target as HTMLElement | null;
+      if (
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        target?.isContentEditable
+      ) {
+        return;
+      }
       e.preventDefault();
       const idx = sortedEntries.findIndex((item) => item.path === selectedPath);
       const currentIdx = idx === -1 ? 0 : idx;
@@ -1417,9 +1432,37 @@ export const MainView: React.FC<MainViewProps> = ({
   };
 
   const canEmptyTrash = isTrashView && !loading && !emptyingTrash && sortedEntries.length > 0;
+  const isSearchView = Boolean(searchQuery && searchQuery.length > 0);
 
   return (
     <div className="finder-main-wrapper">
+      {isSearchView && (
+        <div className="search-header-panel" role="region" aria-label="Search results">
+          <div className="search-header-info">
+            <Search size={14} strokeWidth={1.9} className="search-header-icon" aria-hidden="true" />
+            <span className="search-header-query" title={`Search: "${searchQuery}"`}>
+              Search: &ldquo;{searchQuery}&rdquo;
+            </span>
+            {searchScopeName && (
+              <span className="search-header-scope">in {searchScopeName}</span>
+            )}
+            <span className="search-header-count">
+              {loading
+                ? "Searching…"
+                : `${sortedEntries.length} ${sortedEntries.length === 1 ? "item" : "items"}`}
+            </span>
+          </div>
+          <button
+            type="button"
+            className="trash-empty-btn"
+            onClick={() => onClearSearch?.()}
+            title="Clear search and return to folder"
+          >
+            Clear
+          </button>
+        </div>
+      )}
+
       {isTrashView && (
         <div className="trash-header-panel" role="region" aria-label="Trash actions">
           <div className="trash-header-info">
@@ -1532,7 +1575,7 @@ export const MainView: React.FC<MainViewProps> = ({
                 className={`pathbar-crumb ${isLast ? "current" : ""}`}
                 title={crumb.path}
                 onClick={() => {
-                  if (!isLast) onOpenFolder(crumb.path);
+                  if (!isLast || isSearchView) onOpenFolder(crumb.path);
                 }}
               >
                 {renderBreadcrumbIcon(crumb, index, homePath)}
