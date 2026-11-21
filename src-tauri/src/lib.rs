@@ -178,10 +178,54 @@ fn sanitize_theme(theme: &str) -> String {
     }
 }
 
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SidebarVisibilitySettings {
+    #[serde(default = "default_true")]
+    pub recents: bool,
+    #[serde(default = "default_true")]
+    pub applications: bool,
+    #[serde(default = "default_true")]
+    pub desktop: bool,
+    #[serde(default = "default_true")]
+    pub documents: bool,
+    #[serde(default = "default_true")]
+    pub downloads: bool,
+    #[serde(default = "default_true")]
+    pub home: bool,
+    #[serde(default = "default_true")]
+    pub drives: bool,
+    #[serde(default = "default_true")]
+    pub network: bool,
+    #[serde(default = "default_true")]
+    pub trash: bool,
+}
+
+impl Default for SidebarVisibilitySettings {
+    fn default() -> Self {
+        Self {
+            recents: true,
+            applications: true,
+            desktop: true,
+            documents: true,
+            downloads: true,
+            home: true,
+            drives: true,
+            network: true,
+            trash: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AppSettings {
     pub use_windows_window_controls: bool,
+    pub sidebar_visibility: SidebarVisibilitySettings,
     pub use_everything_cli: Option<bool>,
     #[serde(default = "default_theme")]
     pub theme: String,
@@ -191,6 +235,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             use_windows_window_controls: false,
+            sidebar_visibility: SidebarVisibilitySettings::default(),
             use_everything_cli: None,
             theme: default_theme(),
         }
@@ -3195,11 +3240,33 @@ mod tests {
         assert!(!state.settings.use_windows_window_controls);
         assert_eq!(state.settings.use_everything_cli, None);
         assert_eq!(state.settings.theme, "light");
+        assert_eq!(
+            state.settings.sidebar_visibility,
+            SidebarVisibilitySettings::default()
+        );
+        assert!(state.settings.sidebar_visibility.recents);
+        assert!(state.settings.sidebar_visibility.home);
+        assert!(state.settings.sidebar_visibility.trash);
 
         let explicit_json =
             r#"{"activePanel":"home","panels":{},"settings":{"useEverythingCli":false}}"#;
         let explicit_state: PersistedAppState = serde_json::from_str(explicit_json).unwrap();
         assert_eq!(explicit_state.settings.use_everything_cli, Some(false));
+    }
+
+    #[test]
+    fn persisted_app_state_defaults_partial_sidebar_visibility() {
+        let partial_json = r#"{"activePanel":"home","panels":{},"settings":{"sidebarVisibility":{"recents":false,"network":false}}}"#;
+        let state: PersistedAppState = serde_json::from_str(partial_json).unwrap();
+        assert!(!state.settings.sidebar_visibility.recents);
+        assert!(!state.settings.sidebar_visibility.network);
+        assert!(state.settings.sidebar_visibility.applications);
+        assert!(state.settings.sidebar_visibility.desktop);
+        assert!(state.settings.sidebar_visibility.documents);
+        assert!(state.settings.sidebar_visibility.downloads);
+        assert!(state.settings.sidebar_visibility.home);
+        assert!(state.settings.sidebar_visibility.drives);
+        assert!(state.settings.sidebar_visibility.trash);
     }
 
     #[test]
@@ -3271,12 +3338,18 @@ mod tests {
         let mut state = PersistedAppState::default();
         state.settings.use_windows_window_controls = true;
         state.settings.theme = "dark".to_string();
+        state.settings.sidebar_visibility.recents = false;
+        state.settings.sidebar_visibility.trash = false;
         let json = serde_json::to_string(&state).unwrap();
         assert!(json.contains("useWindowsWindowControls"));
         assert!(json.contains(r#""theme":"dark""#));
+        assert!(json.contains("sidebarVisibility"));
         let decoded: PersistedAppState = serde_json::from_str(&json).unwrap();
         assert!(decoded.settings.use_windows_window_controls);
         assert_eq!(decoded.settings.theme, "dark");
+        assert!(!decoded.settings.sidebar_visibility.recents);
+        assert!(!decoded.settings.sidebar_visibility.trash);
+        assert!(decoded.settings.sidebar_visibility.home);
     }
 
     #[test]

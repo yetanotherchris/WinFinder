@@ -97,8 +97,21 @@ export interface PanelState {
 
 export type ThemeMode = "light" | "dark";
 
+export interface SidebarVisibilitySettings {
+  recents: boolean;
+  applications: boolean;
+  desktop: boolean;
+  documents: boolean;
+  downloads: boolean;
+  home: boolean;
+  drives: boolean;
+  network: boolean;
+  trash: boolean;
+}
+
 export interface AppSettings {
   useWindowsWindowControls: boolean;
+  sidebarVisibility: SidebarVisibilitySettings;
   useEverythingCli?: boolean | null;
   theme: ThemeMode;
 }

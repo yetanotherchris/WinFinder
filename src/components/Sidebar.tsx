@@ -12,7 +12,12 @@ import {
   Trash2,
   Plus,
 } from "lucide-react";
-import type { FavoriteFolder, PanelId, SidebarLocations } from "../types";
+import type {
+  FavoriteFolder,
+  PanelId,
+  SidebarLocations,
+  SidebarVisibilitySettings,
+} from "../types";
 import {
   countBuiltInFavorites,
   MAX_FAVORITES_ITEMS,
@@ -23,6 +28,7 @@ interface SidebarProps {
   locations: SidebarLocations | null;
   activePanel: PanelId;
   customFavorites: FavoriteFolder[];
+  visibility: SidebarVisibilitySettings;
   inAppDropState: FavoriteDropState;
   osDragOverFavorites: boolean;
   favoritesSectionRef: React.RefObject<HTMLDivElement | null>;
@@ -41,6 +47,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   locations,
   activePanel,
   customFavorites,
+  visibility,
   inAppDropState,
   osDragOverFavorites,
   favoritesSectionRef,
@@ -135,6 +142,20 @@ export const Sidebar: React.FC<SidebarProps> = ({
       : "accept"
     : inAppDropState;
 
+  const showDesktop = Boolean(locations?.desktopPath) && visibility.desktop;
+  const showDocuments = Boolean(locations?.documentsPath) && visibility.documents;
+  const showDownloads = Boolean(locations?.downloadsPath) && visibility.downloads;
+  const hasVisibleFavorites =
+    visibility.recents ||
+    visibility.applications ||
+    showDesktop ||
+    showDocuments ||
+    showDownloads ||
+    visibility.home ||
+    customFavorites.length > 0;
+  const hasVisibleLocations =
+    visibility.drives || visibility.network || visibility.trash;
+
   return (
     <aside
       className="finder-sidebar"
@@ -200,187 +221,203 @@ export const Sidebar: React.FC<SidebarProps> = ({
       {/* Scrollable Sidebar Sections */}
       <nav className="sidebar-scroll">
         {/* Favorites */}
-        <div
-          ref={favoritesSectionRef}
-          className={`sidebar-section sidebar-favorites-section ${
-            effectiveDropState === "accept"
-              ? "favorites-drop-accept"
-              : effectiveDropState === "full" || effectiveDropState === "duplicate"
-                ? "favorites-drop-blocked"
-                : ""
-          }`}
-        >
-          <div className="sidebar-section-header">Favorites</div>
-          <ul className="sidebar-list">
-            <li>
-              <button
-                type="button"
-                className={`sidebar-item interactive ${activePanel === "recents" ? "active" : ""}`}
-                onClick={(e) => handlePanelClick("recents", e)}
-                onAuxClick={(e) => handlePanelAuxClick("recents", e)}
-                onContextMenu={(e) => handlePanelContextMenu("recents", e)}
-                title="Recents"
-              >
-                <Clock className="sidebar-icon accent-blue" size={16} strokeWidth={1.8} />
-                <span className="sidebar-label">Recents</span>
-              </button>
-            </li>
-            <li>
-              <button
-                type="button"
-                className={`sidebar-item interactive ${activePanel === "applications" ? "active" : ""}`}
-                onClick={(e) => handlePanelClick("applications", e)}
-                onAuxClick={(e) => handlePanelAuxClick("applications", e)}
-                onContextMenu={(e) => handlePanelContextMenu("applications", e)}
-                title="Applications"
-              >
-                <LayoutGrid className="sidebar-icon accent-blue" size={16} strokeWidth={1.8} />
-                <span className="sidebar-label">Applications</span>
-              </button>
-            </li>
-            {locations?.desktopPath && (
-              <li>
-                <button
-                  type="button"
-                  className={`sidebar-item interactive ${activePanel === "desktop" ? "active" : ""}`}
-                  onClick={(e) => handlePanelClick("desktop", e)}
-                  onAuxClick={(e) => handlePanelAuxClick("desktop", e)}
-                  onContextMenu={(e) => handlePanelContextMenu("desktop", e)}
-                  title="Desktop"
-                >
-                  <Monitor className="sidebar-icon accent-blue" size={16} strokeWidth={1.8} />
-                  <span className="sidebar-label">Desktop</span>
-                </button>
-              </li>
-            )}
-            {locations?.documentsPath && (
-              <li>
-                <button
-                  type="button"
-                  className={`sidebar-item interactive ${activePanel === "documents" ? "active" : ""}`}
-                  onClick={(e) => handlePanelClick("documents", e)}
-                  onAuxClick={(e) => handlePanelAuxClick("documents", e)}
-                  onContextMenu={(e) => handlePanelContextMenu("documents", e)}
-                  title="Documents"
-                >
-                  <FileText className="sidebar-icon accent-blue" size={16} strokeWidth={1.8} />
-                  <span className="sidebar-label">Documents</span>
-                </button>
-              </li>
-            )}
-            {locations?.downloadsPath && (
-              <li>
-                <button
-                  type="button"
-                  className={`sidebar-item interactive ${activePanel === "downloads" ? "active" : ""}`}
-                  onClick={(e) => handlePanelClick("downloads", e)}
-                  onAuxClick={(e) => handlePanelAuxClick("downloads", e)}
-                  onContextMenu={(e) => handlePanelContextMenu("downloads", e)}
-                  title="Downloads"
-                >
-                  <ArrowDownCircle className="sidebar-icon accent-blue" size={16} strokeWidth={1.8} />
-                  <span className="sidebar-label">Downloads</span>
-                </button>
-              </li>
-            )}
-            <li>
-              <button
-                type="button"
-                className={`sidebar-item interactive ${activePanel === "home" ? "active" : ""}`}
-                onClick={(e) => handlePanelClick("home", e)}
-                onAuxClick={(e) => handlePanelAuxClick("home", e)}
-                onContextMenu={(e) => handlePanelContextMenu("home", e)}
-                title={`Home (${homeName})`}
-              >
-                <Home className="sidebar-icon accent-blue" size={16} strokeWidth={1.8} />
-                <span className="sidebar-label">{homeName}</span>
-              </button>
-            </li>
-            {customFavorites.map((fav) => {
-              const panelId: PanelId = `fav:${fav.path}`;
-              return (
-                <li key={fav.path}>
+        {(hasVisibleFavorites || effectiveDropState !== "none") && (
+          <div
+            ref={favoritesSectionRef}
+            className={`sidebar-section sidebar-favorites-section ${
+              effectiveDropState === "accept"
+                ? "favorites-drop-accept"
+                : effectiveDropState === "full" || effectiveDropState === "duplicate"
+                  ? "favorites-drop-blocked"
+                  : ""
+            }`}
+          >
+            <div className="sidebar-section-header">Favorites</div>
+            <ul className="sidebar-list">
+              {visibility.recents && (
+                <li>
                   <button
                     type="button"
-                    className={`sidebar-item interactive ${activePanel === panelId ? "active" : ""}`}
-                    onClick={(e) => handlePanelClick(panelId, e)}
-                    onAuxClick={(e) => handlePanelAuxClick(panelId, e)}
-                    onContextMenu={(e) => handlePanelContextMenu(panelId, e, fav)}
-                    title={fav.path}
+                    className={`sidebar-item interactive ${activePanel === "recents" ? "active" : ""}`}
+                    onClick={(e) => handlePanelClick("recents", e)}
+                    onAuxClick={(e) => handlePanelAuxClick("recents", e)}
+                    onContextMenu={(e) => handlePanelContextMenu("recents", e)}
+                    title="Recents"
                   >
-                    <Folder className="sidebar-icon accent-blue" size={16} strokeWidth={1.8} />
-                    <span className="sidebar-label">{fav.name}</span>
+                    <Clock className="sidebar-icon accent-blue" size={16} strokeWidth={1.8} />
+                    <span className="sidebar-label">Recents</span>
                   </button>
                 </li>
-              );
-            })}
-          </ul>
+              )}
+              {visibility.applications && (
+                <li>
+                  <button
+                    type="button"
+                    className={`sidebar-item interactive ${activePanel === "applications" ? "active" : ""}`}
+                    onClick={(e) => handlePanelClick("applications", e)}
+                    onAuxClick={(e) => handlePanelAuxClick("applications", e)}
+                    onContextMenu={(e) => handlePanelContextMenu("applications", e)}
+                    title="Applications"
+                  >
+                    <LayoutGrid className="sidebar-icon accent-blue" size={16} strokeWidth={1.8} />
+                    <span className="sidebar-label">Applications</span>
+                  </button>
+                </li>
+              )}
+              {showDesktop && (
+                <li>
+                  <button
+                    type="button"
+                    className={`sidebar-item interactive ${activePanel === "desktop" ? "active" : ""}`}
+                    onClick={(e) => handlePanelClick("desktop", e)}
+                    onAuxClick={(e) => handlePanelAuxClick("desktop", e)}
+                    onContextMenu={(e) => handlePanelContextMenu("desktop", e)}
+                    title="Desktop"
+                  >
+                    <Monitor className="sidebar-icon accent-blue" size={16} strokeWidth={1.8} />
+                    <span className="sidebar-label">Desktop</span>
+                  </button>
+                </li>
+              )}
+              {showDocuments && (
+                <li>
+                  <button
+                    type="button"
+                    className={`sidebar-item interactive ${activePanel === "documents" ? "active" : ""}`}
+                    onClick={(e) => handlePanelClick("documents", e)}
+                    onAuxClick={(e) => handlePanelAuxClick("documents", e)}
+                    onContextMenu={(e) => handlePanelContextMenu("documents", e)}
+                    title="Documents"
+                  >
+                    <FileText className="sidebar-icon accent-blue" size={16} strokeWidth={1.8} />
+                    <span className="sidebar-label">Documents</span>
+                  </button>
+                </li>
+              )}
+              {showDownloads && (
+                <li>
+                  <button
+                    type="button"
+                    className={`sidebar-item interactive ${activePanel === "downloads" ? "active" : ""}`}
+                    onClick={(e) => handlePanelClick("downloads", e)}
+                    onAuxClick={(e) => handlePanelAuxClick("downloads", e)}
+                    onContextMenu={(e) => handlePanelContextMenu("downloads", e)}
+                    title="Downloads"
+                  >
+                    <ArrowDownCircle className="sidebar-icon accent-blue" size={16} strokeWidth={1.8} />
+                    <span className="sidebar-label">Downloads</span>
+                  </button>
+                </li>
+              )}
+              {visibility.home && (
+                <li>
+                  <button
+                    type="button"
+                    className={`sidebar-item interactive ${activePanel === "home" ? "active" : ""}`}
+                    onClick={(e) => handlePanelClick("home", e)}
+                    onAuxClick={(e) => handlePanelAuxClick("home", e)}
+                    onContextMenu={(e) => handlePanelContextMenu("home", e)}
+                    title={`Home (${homeName})`}
+                  >
+                    <Home className="sidebar-icon accent-blue" size={16} strokeWidth={1.8} />
+                    <span className="sidebar-label">{homeName}</span>
+                  </button>
+                </li>
+              )}
+              {customFavorites.map((fav) => {
+                const panelId: PanelId = `fav:${fav.path}`;
+                return (
+                  <li key={fav.path}>
+                    <button
+                      type="button"
+                      className={`sidebar-item interactive ${activePanel === panelId ? "active" : ""}`}
+                      onClick={(e) => handlePanelClick(panelId, e)}
+                      onAuxClick={(e) => handlePanelAuxClick(panelId, e)}
+                      onContextMenu={(e) => handlePanelContextMenu(panelId, e, fav)}
+                      title={fav.path}
+                    >
+                      <Folder className="sidebar-icon accent-blue" size={16} strokeWidth={1.8} />
+                      <span className="sidebar-label">{fav.name}</span>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
 
-          {effectiveDropState === "accept" && (
-            <div className="favorites-drop-indicator" aria-hidden="true">
-              <span className="favorites-drop-dot" />
-              <span className="favorites-drop-line" />
-            </div>
-          )}
+            {effectiveDropState === "accept" && (
+              <div className="favorites-drop-indicator" aria-hidden="true">
+                <span className="favorites-drop-dot" />
+                <span className="favorites-drop-line" />
+              </div>
+            )}
 
-          {effectiveDropState === "full" && (
-            <div className="favorites-drop-hint" role="status">
-              Maximum {MAX_FAVORITES_ITEMS} favorites reached
-            </div>
-          )}
+            {effectiveDropState === "full" && (
+              <div className="favorites-drop-hint" role="status">
+                Maximum {MAX_FAVORITES_ITEMS} favorites reached
+              </div>
+            )}
 
-          {effectiveDropState === "duplicate" && (
-            <div className="favorites-drop-hint" role="status">
-              Already in Favorites
-            </div>
-          )}
-        </div>
+            {effectiveDropState === "duplicate" && (
+              <div className="favorites-drop-hint" role="status">
+                Already in Favorites
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Locations */}
-        <div className="sidebar-section">
-          <div className="sidebar-section-header">Locations</div>
-          <ul className="sidebar-list">
-            <li>
-              <button
-                type="button"
-                className={`sidebar-item interactive ${activePanel === "drives" ? "active" : ""}`}
-                onClick={(e) => handlePanelClick("drives", e)}
-                onAuxClick={(e) => handlePanelAuxClick("drives", e)}
-                onContextMenu={(e) => handlePanelContextMenu("drives", e)}
-                title="Drives"
-              >
-                <HardDrive className="sidebar-icon muted-gray" size={16} strokeWidth={1.8} />
-                <span className="sidebar-label">Drives</span>
-              </button>
-            </li>
-            <li>
-              <button
-                type="button"
-                className={`sidebar-item interactive ${activePanel === "network" ? "active" : ""}`}
-                onClick={(e) => handlePanelClick("network", e)}
-                onAuxClick={(e) => handlePanelAuxClick("network", e)}
-                onContextMenu={(e) => handlePanelContextMenu("network", e)}
-                title="Network"
-              >
-                <Globe className="sidebar-icon muted-gray" size={16} strokeWidth={1.8} />
-                <span className="sidebar-label">Network</span>
-              </button>
-            </li>
-            <li>
-              <button
-                type="button"
-                className={`sidebar-item interactive ${activePanel === "trash" ? "active" : ""}`}
-                onClick={(e) => handlePanelClick("trash", e)}
-                onAuxClick={(e) => handlePanelAuxClick("trash", e)}
-                onContextMenu={(e) => handlePanelContextMenu("trash", e)}
-                title="Trash"
-              >
-                <Trash2 className="sidebar-icon muted-gray" size={16} strokeWidth={1.8} />
-                <span className="sidebar-label">Trash</span>
-              </button>
-            </li>
-          </ul>
-        </div>
+        {hasVisibleLocations && (
+          <div className="sidebar-section">
+            <div className="sidebar-section-header">Locations</div>
+            <ul className="sidebar-list">
+              {visibility.drives && (
+                <li>
+                  <button
+                    type="button"
+                    className={`sidebar-item interactive ${activePanel === "drives" ? "active" : ""}`}
+                    onClick={(e) => handlePanelClick("drives", e)}
+                    onAuxClick={(e) => handlePanelAuxClick("drives", e)}
+                    onContextMenu={(e) => handlePanelContextMenu("drives", e)}
+                    title="Drives"
+                  >
+                    <HardDrive className="sidebar-icon muted-gray" size={16} strokeWidth={1.8} />
+                    <span className="sidebar-label">Drives</span>
+                  </button>
+                </li>
+              )}
+              {visibility.network && (
+                <li>
+                  <button
+                    type="button"
+                    className={`sidebar-item interactive ${activePanel === "network" ? "active" : ""}`}
+                    onClick={(e) => handlePanelClick("network", e)}
+                    onAuxClick={(e) => handlePanelAuxClick("network", e)}
+                    onContextMenu={(e) => handlePanelContextMenu("network", e)}
+                    title="Network"
+                  >
+                    <Globe className="sidebar-icon muted-gray" size={16} strokeWidth={1.8} />
+                    <span className="sidebar-label">Network</span>
+                  </button>
+                </li>
+              )}
+              {visibility.trash && (
+                <li>
+                  <button
+                    type="button"
+                    className={`sidebar-item interactive ${activePanel === "trash" ? "active" : ""}`}
+                    onClick={(e) => handlePanelClick("trash", e)}
+                    onAuxClick={(e) => handlePanelAuxClick("trash", e)}
+                    onContextMenu={(e) => handlePanelContextMenu("trash", e)}
+                    title="Trash"
+                  >
+                    <Trash2 className="sidebar-icon muted-gray" size={16} strokeWidth={1.8} />
+                    <span className="sidebar-label">Trash</span>
+                  </button>
+                </li>
+              )}
+            </ul>
+          </div>
+        )}
       </nav>
 
       {/* Right-click context menu for sidebar items */}

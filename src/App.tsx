@@ -28,6 +28,10 @@ import {
   buildDescendantChain,
   resolveViewAnchorChain,
 } from "./utils/pathChain";
+import {
+  DEFAULT_SIDEBAR_VISIBILITY,
+  normalizeSidebarVisibility,
+} from "./utils/sidebarVisibility";
 import type {
   AppSettings,
   BitlockerNotice,
@@ -65,6 +69,7 @@ function normalizeTheme(value: unknown): ThemeMode {
 
 const DEFAULT_SETTINGS: AppSettings = {
   useWindowsWindowControls: false,
+  sidebarVisibility: DEFAULT_SIDEBAR_VISIBILITY,
   useEverythingCli: null,
   theme: "light",
 };
@@ -137,6 +142,7 @@ function loadBrowserSettings(): AppSettings {
     const parsed = JSON.parse(raw);
     return {
       useWindowsWindowControls: Boolean(parsed?.useWindowsWindowControls),
+      sidebarVisibility: normalizeSidebarVisibility(parsed?.sidebarVisibility),
       useEverythingCli:
         typeof parsed?.useEverythingCli === "boolean"
           ? parsed.useEverythingCli
@@ -1086,6 +1092,9 @@ export const App: React.FC = () => {
         ? {
             useWindowsWindowControls: Boolean(
               persisted?.settings?.useWindowsWindowControls
+            ),
+            sidebarVisibility: normalizeSidebarVisibility(
+              persisted?.settings?.sidebarVisibility
             ),
             useEverythingCli:
               typeof persisted?.settings?.useEverythingCli === "boolean"
@@ -2491,6 +2500,7 @@ export const App: React.FC = () => {
         locations={locations}
         activePanel={activePanel}
         customFavorites={customFavorites}
+        visibility={settings.sidebarVisibility}
         inAppDropState={inAppDrag?.dropState ?? "none"}
         osDragOverFavorites={osDragOverFavorites}
         favoritesSectionRef={favoritesSectionRef}
@@ -2651,6 +2661,7 @@ export const App: React.FC = () => {
       {settingsOpen && (
         <SettingsDialog
           settings={settings}
+          locations={locations}
           onChange={handleUpdateSettings}
           onClose={() => setSettingsOpen(false)}
         />
