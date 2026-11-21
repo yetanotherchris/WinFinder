@@ -1,0 +1,1199 @@
+use serde::Serialize;
+use std::fs;
+use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::UNIX_EPOCH;
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BreadcrumbItem {
+    pub name: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileEntry {
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+    /// One of: "folder", "file", "app", "drive"
+    pub entry_kind: String,
+    pub extension: Option<String>,
+    pub size: u64,
+    pub modified_ms: Option<u64>,
+    pub icon_data_url: Option<String>,
+}
+
+enum AppsLoadState {
+    Loading,
+    Ready(Vec<FileEntry>),
+    Failed(String),
+}
+
+struct AppsCache {
+    state: Mutex<AppsLoadState>,
+    ready: Condvar,
+}
+
+impl AppsCache {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(AppsLoadState::Loading),
+            ready: Condvar::new(),
+        })
+    }
+
+    fn start_preload(self: &Arc<Self>) {
+        let cache = Arc::clone(self);
+        std::thread::spawn(move || {
+            let result = load_applications_entries();
+            let mut guard = cache.state.lock().unwrap();
+            *guard = match result {
+                Ok(entries) => AppsLoadState::Ready(entries),
+                Err(err) => AppsLoadState::Failed(err),
+            };
+            cache.ready.notify_all();
+        });
+    }
+
+    fn get_or_wait(&self) -> Result<Vec<FileEntry>, String> {
+        let mut guard = self.state.lock().unwrap();
+        while matches!(*guard, AppsLoadState::Loading) {
+            guard = self.ready.wait(guard).unwrap();
+        }
+        match &*guard {
+            AppsLoadState::Ready(entries) => Ok(entries.clone()),
+            AppsLoadState::Failed(err) => Err(err.clone()),
+            AppsLoadState::Loading => unreachable!(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectoryListing {
+    pub current_path: String,
+    pub current_name: String,
+    pub home_path: String,
+    pub home_name: String,
+    pub breadcrumbs: Vec<BreadcrumbItem>,
+    pub entries: Vec<FileEntry>,
+    pub empty_message: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SidebarLocations {
+    pub home_path: String,
+    pub home_name: String,
+    pub desktop_path: Option<String>,
+    pub documents_path: Option<String>,
+    pub downloads_path: Option<String>,
+}
+
+fn is_hidden_entry(name: &str, metadata: &fs::Metadata) -> bool {
+    if name.starts_with('.') {
+        return true;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+        const FILE_ATTRIBUTE_SYSTEM: u32 = 0x4;
+        let attrs = metadata.file_attributes();
+        if (attrs & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM)) != 0 {
+            return true;
+        }
+    }
+
+    let _ = metadata;
+    false
+}
+
+fn display_name_for_path(path: &Path) -> String {
+    if let Some(name) = path.file_name() {
+        let s = name.to_string_lossy().into_owned();
+        if !s.is_empty() {
+            return s;
+        }
+    }
+    path.to_string_lossy().into_owned()
+}
+
+fn build_breadcrumbs(home: &Path, current: &Path) -> Vec<BreadcrumbItem> {
+    // If inside home, anchor breadcrumbs at home
+    if let Ok(relative) = current.strip_prefix(home) {
+        let mut crumbs = vec![BreadcrumbItem {
+            name: display_name_for_path(home),
+            path: home.to_string_lossy().into_owned(),
+        }];
+        let mut running = home.to_path_buf();
+        for comp in relative.components() {
+            running.push(comp.as_os_str());
+            crumbs.push(BreadcrumbItem {
+                name: comp.as_os_str().to_string_lossy().into_owned(),
+                path: running.to_string_lossy().into_owned(),
+            });
+        }
+        return crumbs;
+    }
+
+    // Otherwise build from filesystem root (e.g. C:\ > Users > ... or / > usr > ...)
+    let mut crumbs = Vec::new();
+    let mut running = PathBuf::new();
+
+    for comp in current.components() {
+        match comp {
+            Component::Prefix(prefix) => {
+                running.push(prefix.as_os_str());
+            }
+            Component::RootDir => {
+                running.push(comp.as_os_str());
+                let label = running.to_string_lossy().into_owned();
+                crumbs.push(BreadcrumbItem {
+                    name: label,
+                    path: running.to_string_lossy().into_owned(),
+                });
+            }
+            Component::Normal(seg) => {
+                running.push(seg);
+                crumbs.push(BreadcrumbItem {
+                    name: seg.to_string_lossy().into_owned(),
+                    path: running.to_string_lossy().into_owned(),
+                });
+            }
+            _ => {}
+        }
+    }
+
+    if crumbs.is_empty() {
+        crumbs.push(BreadcrumbItem {
+            name: display_name_for_path(current),
+            path: current.to_string_lossy().into_owned(),
+        });
+    }
+
+    crumbs
+}
+
+fn home_info() -> Result<(PathBuf, String, String), String> {
+    let home = dirs::home_dir().ok_or_else(|| "Could not locate home directory".to_string())?;
+    let home_path = home.to_string_lossy().into_owned();
+    let home_name = display_name_for_path(&home);
+    Ok((home, home_path, home_name))
+}
+
+fn list_fs_directory(target: &Path) -> Result<DirectoryListing, String> {
+    let (home, home_path, home_name) = home_info()?;
+
+    let read_dir =
+        fs::read_dir(target).map_err(|e| format!("Unable to read folder contents: {}", e))?;
+
+    let mut entries = Vec::new();
+    for item in read_dir.flatten() {
+        let entry_path = item.path();
+        let name = item.file_name().to_string_lossy().into_owned();
+
+        let metadata = match item.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+
+        if is_hidden_entry(&name, &metadata) {
+            continue;
+        }
+
+        let is_dir = metadata.is_dir();
+        let extension = if is_dir {
+            None
+        } else {
+            entry_path
+                .extension()
+                .map(|e| e.to_string_lossy().to_lowercase())
+        };
+        let modified_ms = metadata
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64);
+
+        entries.push(FileEntry {
+            name,
+            path: entry_path.to_string_lossy().into_owned(),
+            is_dir,
+            entry_kind: if is_dir {
+                "folder".to_string()
+            } else {
+                "file".to_string()
+            },
+            extension,
+            size: if is_dir { 0 } else { metadata.len() },
+            modified_ms,
+            icon_data_url: None,
+        });
+    }
+
+    entries.sort_by(|a, b| {
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+
+    let breadcrumbs = build_breadcrumbs(&home, target);
+
+    Ok(DirectoryListing {
+        current_path: target.to_string_lossy().into_owned(),
+        current_name: display_name_for_path(target),
+        home_path,
+        home_name,
+        breadcrumbs,
+        entries,
+        empty_message: None,
+    })
+}
+
+fn list_recents() -> Result<DirectoryListing, String> {
+    let (home, home_path, home_name) = home_info()?;
+
+    let mut search_dirs: Vec<PathBuf> = vec![home.clone()];
+    for maybe_dir in [
+        dirs::desktop_dir(),
+        dirs::document_dir(),
+        dirs::download_dir(),
+        dirs::picture_dir(),
+        dirs::audio_dir(),
+        dirs::video_dir(),
+    ] {
+        if let Some(d) = maybe_dir {
+            if !search_dirs.contains(&d) {
+                search_dirs.push(d);
+            }
+        }
+    }
+
+    let mut collected: Vec<(u128, FileEntry)> = Vec::new();
+    for dir in search_dirs {
+        let Ok(read_dir) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for item in read_dir.flatten() {
+            let entry_path = item.path();
+            let name = item.file_name().to_string_lossy().into_owned();
+            let Ok(metadata) = item.metadata() else {
+                continue;
+            };
+            if metadata.is_dir() || is_hidden_entry(&name, &metadata) {
+                continue;
+            }
+            let modified_ms = metadata
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_millis())
+                .unwrap_or(0);
+            let extension = entry_path
+                .extension()
+                .map(|e| e.to_string_lossy().to_lowercase());
+
+            collected.push((
+                modified_ms,
+                FileEntry {
+                    name,
+                    path: entry_path.to_string_lossy().into_owned(),
+                    is_dir: false,
+                    entry_kind: "file".to_string(),
+                    extension,
+                    size: metadata.len(),
+                    modified_ms: if modified_ms > 0 { Some(modified_ms as u64) } else { None },
+                    icon_data_url: None,
+                },
+            ));
+        }
+    }
+
+    collected.sort_by(|a, b| b.0.cmp(&a.0));
+    let entries: Vec<FileEntry> = collected.into_iter().take(60).map(|(_, e)| e).collect();
+
+    Ok(DirectoryListing {
+        current_path: "virtual://recents".to_string(),
+        current_name: "Recents".to_string(),
+        home_path,
+        home_name,
+        breadcrumbs: vec![BreadcrumbItem {
+            name: "Recents".to_string(),
+            path: "virtual://recents".to_string(),
+        }],
+        entries,
+        empty_message: Some("No recent files found".to_string()),
+    })
+}
+
+#[cfg(target_os = "windows")]
+mod win_shell {
+    use super::FileEntry;
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+    use std::collections::HashSet;
+    use std::mem::size_of;
+    use windows::ApplicationModel::DataTransfer::{
+        DataRequestedEventArgs, DataTransferManager,
+    };
+    use windows::Foundation::TypedEventHandler;
+    use windows::Storage::{IStorageItem, StorageFile};
+    use windows::core::{Interface, HSTRING, PCSTR, PCWSTR, PWSTR};
+    use windows::Win32::Foundation::{GlobalFree, HANDLE, HWND, LPARAM, POINT, SIZE, WPARAM};
+    use windows::Win32::Graphics::Gdi::{
+        CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits, GetObjectW, BITMAP, BITMAPINFO,
+        BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP,
+    };
+    use windows::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives};
+    use windows::Win32::System::Com::{
+        CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::System::DataExchange::{
+        CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+    };
+    use windows::Win32::System::Memory::{
+        GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE, GMEM_ZEROINIT,
+    };
+    use windows::Win32::System::Ole::CF_HDROP;
+    use windows::Win32::UI::Shell::{
+        BHID_EnumItems, BHID_SFUIObject, FOLDERID_AppsFolder, IContextMenu,
+        IDataTransferManagerInterop, IEnumShellItems, IShellItem, IShellItemImageFactory,
+        SHCreateItemFromParsingName, SHCreateItemFromRelativeName, SHGetKnownFolderItem,
+        CMF_EXPLORE, CMF_NORMAL, CMIC_MASK_PTINVOKE, CMINVOKECOMMANDINFO, CMINVOKECOMMANDINFOEX,
+        DROPFILES, KF_FLAG_DEFAULT, SEE_MASK_UNICODE, SIGDN_NORMALDISPLAY,
+        SIGDN_PARENTRELATIVEPARSING, SIIGBF_BIGGERSIZEOK, SIIGBF_ICONONLY,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreatePopupMenu, DestroyMenu, GetCursorPos, PostMessageW, SetForegroundWindow,
+        TrackPopupMenuEx, SW_SHOWNORMAL, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_NULL,
+    };
+
+    const DRIVE_REMOTE: u32 = 4;
+
+    unsafe fn pwstr_to_string(ptr: PWSTR) -> Option<String> {
+        if ptr.is_null() {
+            return None;
+        }
+        let s = ptr.to_string().ok();
+        CoTaskMemFree(Some(ptr.0 as *const _));
+        s
+    }
+
+    unsafe fn hbitmap_to_png_data_url(hbmp: HBITMAP) -> Option<String> {
+        let mut bm = BITMAP::default();
+        if GetObjectW(hbmp.into(), size_of::<BITMAP>() as i32, Some(&mut bm as *mut _ as *mut _))
+            == 0
+        {
+            return None;
+        }
+
+        let width = bm.bmWidth;
+        let height = bm.bmHeight;
+        if width <= 0 || height <= 0 || width > 256 || height > 256 {
+            return None;
+        }
+
+        let mut bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: width,
+                biHeight: -height, // top-down DIB
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let mut pixels = vec![0u8; (width as usize) * (height as usize) * 4];
+        let hdc = CreateCompatibleDC(None);
+        if hdc.is_invalid() {
+            return None;
+        }
+
+        let lines = GetDIBits(
+            hdc,
+            hbmp,
+            0,
+            height as u32,
+            Some(pixels.as_mut_ptr() as *mut _),
+            &mut bmi,
+            DIB_RGB_COLORS,
+        );
+        let _ = DeleteDC(hdc);
+
+        if lines == 0 {
+            return None;
+        }
+
+        // Convert BGRA -> RGBA and check if alpha channel is completely zero
+        let mut any_alpha = false;
+        for px in pixels.chunks_exact_mut(4) {
+            px.swap(0, 2);
+            if px[3] != 0 {
+                any_alpha = true;
+            }
+        }
+        if !any_alpha {
+            for px in pixels.chunks_exact_mut(4) {
+                px[3] = 255;
+            }
+        }
+
+        let mut png_bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut png_bytes, width as u32, height as u32);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().ok()?;
+            writer.write_image_data(&pixels).ok()?;
+        }
+
+        Some(format!("data:image/png;base64,{}", BASE64.encode(&png_bytes)))
+    }
+
+    fn should_include_app(name: &str, aumid: &str) -> bool {
+        let n = name.trim().to_lowercase();
+        let p = aumid.trim().to_lowercase();
+
+        if n.is_empty() {
+            return false;
+        }
+
+        // 1. Web links, docs, help files, manuals, licenses, config files
+        if p.starts_with("http://") || p.starts_with("https://") {
+            return false;
+        }
+        for ext in [".url", ".chm", ".html", ".htm", ".pdf", ".rtf", ".ini", ".txt", ".md"] {
+            if p.ends_with(ext) {
+                return false;
+            }
+        }
+        if n == "website"
+            || n == "faq"
+            || n.ends_with(" help")
+            || n.contains("documentation")
+            || n.contains("user manual")
+            || n.contains("user guide")
+            || n.contains("getting started")
+            || n.contains("release notes")
+            || n.contains("module docs")
+            || n.contains("license (")
+            || n.contains("on the web")
+            || n.contains("config file")
+            || n.contains("faqs")
+        {
+            return false;
+        }
+
+        // 2. WSL Linux GUI app shortcuts (keep the distro terminal itself)
+        if p.starts_with("microsoft.autogenerated.")
+            && (n.contains("(ubuntu")
+                || n.contains("(debian")
+                || n.contains("(kali")
+                || n.contains("(fedora")
+                || n.contains("(opensuse")
+                || n.contains("(arch"))
+        {
+            return false;
+        }
+
+        // 3. Uninstallers, updaters, error reporters, install helpers
+        if p.contains("uninstall")
+            || p.ends_with("updater.exe")
+            || p.ends_with("errorreporter.exe")
+            || n.starts_with("uninstall ")
+            || n.starts_with("install additional tools")
+            || n.ends_with(" updater")
+            || n.contains("error reporter")
+            || n.contains("redeem launcher")
+        {
+            return false;
+        }
+
+        // 4. Steam / Epic / GeForce NOW game shortcuts
+        if p.starts_with("steam://")
+            || p.starts_with("com.epicgames.launcher://")
+            || n.contains(" on geforce now")
+        {
+            return false;
+        }
+
+        // 5. Driver control panels, MMC snap-ins, CPLs, batch scripts, dev prompts & admin tools
+        if p.ends_with(".msc") || p.ends_with(".cpl") || p.ends_with(".bat") {
+            return false;
+        }
+        if p.contains("driver\\") && n.ends_with("control panel") {
+            return false;
+        }
+        if n.contains("system tray icon")
+            || n.contains("command prompt for vs")
+            || n.contains("powershell for vs")
+            || n == "node.js command prompt"
+            || n.starts_with("odbc data sources")
+            || n.starts_with("application verifier")
+            || n.ends_with(" (x86)")
+            || matches!(
+                n.as_str(),
+                "iscsi initiator"
+                    | "local security policy"
+                    | "event viewer"
+                    | "computer management"
+                    | "task scheduler"
+                    | "performance monitor"
+                    | "resource monitor"
+                    | "defragment and optimise drives"
+                    | "defragment and optimize drives"
+                    | "disk clean-up"
+                    | "disk cleanup"
+                    | "windows memory diagnostic"
+                    | "recovery drive"
+                    | "steps recorder"
+                    | "windows app cert kit"
+                    | "debuggable package manager"
+                    | "windows software development kit"
+                    | "app recovery"
+            )
+        {
+            return false;
+        }
+
+        true
+    }
+
+    pub fn enumerate_apps() -> Result<Vec<FileEntry>, String> {
+        unsafe {
+            let co_hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            let should_uninit = co_hr.is_ok();
+
+            let result = (|| -> Result<Vec<FileEntry>, String> {
+                let apps_folder: IShellItem =
+                    SHGetKnownFolderItem(&FOLDERID_AppsFolder, KF_FLAG_DEFAULT, None)
+                        .map_err(|e| format!("Could not open Windows Applications folder: {}", e))?;
+
+                let enum_items: IEnumShellItems = apps_folder
+                    .BindToHandler(None, &BHID_EnumItems)
+                    .map_err(|e| format!("Could not enumerate installed applications: {}", e))?;
+
+                let mut entries = Vec::new();
+                let mut seen_names = HashSet::new();
+                loop {
+                    let mut batch: [Option<IShellItem>; 32] = Default::default();
+                    let mut fetched = 0u32;
+                    let hr = enum_items.Next(&mut batch, Some(&mut fetched));
+                    if fetched == 0 {
+                        break;
+                    }
+
+                    for item in batch.into_iter().take(fetched as usize).flatten() {
+                        let name = item
+                            .GetDisplayName(SIGDN_NORMALDISPLAY)
+                            .ok()
+                            .and_then(|p| pwstr_to_string(p));
+                        let aumid = item
+                            .GetDisplayName(SIGDN_PARENTRELATIVEPARSING)
+                            .ok()
+                            .and_then(|p| pwstr_to_string(p));
+
+                        let (Some(name), Some(aumid)) = (name, aumid) else {
+                            continue;
+                        };
+                        if !should_include_app(&name, &aumid) {
+                            continue;
+                        }
+                        if !seen_names.insert(name.trim().to_lowercase()) {
+                            continue;
+                        }
+
+                        let icon_data_url = item
+                            .cast::<IShellItemImageFactory>()
+                            .ok()
+                            .and_then(|factory| {
+                                factory
+                                    .GetImage(
+                                        SIZE { cx: 64, cy: 64 },
+                                        SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK,
+                                    )
+                                    .ok()
+                            })
+                            .and_then(|hbmp| {
+                                let url = hbitmap_to_png_data_url(hbmp);
+                                let _ = DeleteObject(hbmp.into());
+                                url
+                            });
+
+                        entries.push(FileEntry {
+                            name,
+                            path: format!("app://{}", aumid),
+                            is_dir: false,
+                            entry_kind: "app".to_string(),
+                            extension: None,
+                            size: 0,
+                            modified_ms: None,
+                            icon_data_url,
+                        });
+                    }
+
+                    if hr.is_err() || fetched < 32 {
+                        break;
+                    }
+                }
+
+                entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+                Ok(entries)
+            })();
+
+            if should_uninit {
+                CoUninitialize();
+            }
+
+            result
+        }
+    }
+
+    pub fn enumerate_drives(network_only: bool) -> Vec<FileEntry> {
+        let mask = unsafe { GetLogicalDrives() };
+        let mut drives = Vec::new();
+
+        for i in 0..26u8 {
+            if (mask & (1 << i)) == 0 {
+                continue;
+            }
+            let letter = (b'A' + i) as char;
+            let root = format!("{}:\\", letter);
+            let wide = HSTRING::from(&root);
+            let drive_type = unsafe { GetDriveTypeW(&wide) };
+            let is_remote = drive_type == DRIVE_REMOTE;
+
+            if network_only != is_remote {
+                continue;
+            }
+
+            let label = if is_remote {
+                format!("Network Drive ({}:)", letter)
+            } else {
+                format!("Local Disk ({}:)", letter)
+            };
+
+            drives.push(FileEntry {
+                name: label,
+                path: root,
+                is_dir: true,
+                entry_kind: "drive".to_string(),
+                extension: None,
+                size: 0,
+                modified_ms: None,
+                icon_data_url: None,
+            });
+        }
+
+        drives
+    }
+
+    pub fn show_shell_context_menu(
+        hwnd_raw: isize,
+        path: &str,
+        entry_kind: &str,
+    ) -> Result<bool, String> {
+        unsafe {
+            let co_hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            let should_uninit = co_hr.is_ok();
+
+            let result = (|| -> Result<bool, String> {
+                let shell_item: IShellItem = if entry_kind == "app" {
+                    let aumid = path.strip_prefix("app://").unwrap_or(path);
+                    let apps_folder: IShellItem =
+                        SHGetKnownFolderItem(&FOLDERID_AppsFolder, KF_FLAG_DEFAULT, None)
+                            .map_err(|e| format!("Failed to open AppsFolder: {}", e))?;
+                    SHCreateItemFromRelativeName(&apps_folder, &HSTRING::from(aumid), None)
+                        .map_err(|e| format!("Failed to resolve app item: {}", e))?
+                } else {
+                    SHCreateItemFromParsingName(&HSTRING::from(path), None)
+                        .map_err(|e| format!("Failed to resolve shell item: {}", e))?
+                };
+
+                let context_menu: IContextMenu = shell_item
+                    .BindToHandler(None, &BHID_SFUIObject)
+                    .map_err(|e| format!("Failed to bind context menu: {}", e))?;
+
+                let hmenu = CreatePopupMenu()
+                    .map_err(|e| format!("Failed to create popup menu: {}", e))?;
+
+                let query_res = context_menu.QueryContextMenu(
+                    hmenu,
+                    0,
+                    1,
+                    0x7FFF,
+                    CMF_NORMAL | CMF_EXPLORE,
+                );
+                if query_res.is_err() {
+                    let _ = DestroyMenu(hmenu);
+                    return Err("Failed to populate context menu".to_string());
+                }
+
+                let hwnd = HWND(hwnd_raw as *mut _);
+                let mut pt = POINT::default();
+                let _ = GetCursorPos(&mut pt);
+                let _ = SetForegroundWindow(hwnd);
+
+                let cmd = TrackPopupMenuEx(
+                    hmenu,
+                    (TPM_RETURNCMD | TPM_RIGHTBUTTON).0,
+                    pt.x,
+                    pt.y,
+                    hwnd,
+                    None,
+                );
+
+                let mut invoked = false;
+                if cmd.0 > 0 {
+                    let verb_id = (cmd.0 as usize) - 1;
+                    let ici = CMINVOKECOMMANDINFOEX {
+                        cbSize: size_of::<CMINVOKECOMMANDINFOEX>() as u32,
+                        fMask: SEE_MASK_UNICODE | CMIC_MASK_PTINVOKE,
+                        hwnd,
+                        lpVerb: PCSTR(verb_id as *const u8),
+                        lpVerbW: PCWSTR(verb_id as *const u16),
+                        nShow: SW_SHOWNORMAL.0,
+                        ptInvoke: pt,
+                        ..Default::default()
+                    };
+                    let _ = context_menu
+                        .InvokeCommand(&ici as *const _ as *const CMINVOKECOMMANDINFO);
+                    invoked = true;
+                }
+
+                let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
+                let _ = DestroyMenu(hmenu);
+                Ok(invoked)
+            })();
+
+            if should_uninit {
+                CoUninitialize();
+            }
+
+            result
+        }
+    }
+
+    pub fn copy_file_to_clipboard(path: &str) -> Result<(), String> {
+        use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
+
+        let wide: Vec<u16> = OsStr::new(path)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .chain(std::iter::once(0)) // double null-terminated
+            .collect();
+
+        let header_size = size_of::<DROPFILES>();
+        let total_bytes = header_size + wide.len() * size_of::<u16>();
+
+        unsafe {
+            let hglobal = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, total_bytes)
+                .map_err(|e| format!("Failed to allocate clipboard memory: {}", e))?;
+
+            let ptr = GlobalLock(hglobal);
+            if ptr.is_null() {
+                let _ = GlobalFree(Some(hglobal));
+                return Err("Failed to lock clipboard memory".to_string());
+            }
+
+            let dropfiles = ptr as *mut DROPFILES;
+            (*dropfiles).pFiles = header_size as u32;
+            (*dropfiles).fWide = true.into();
+
+            let dest = (ptr as *mut u8).add(header_size) as *mut u16;
+            std::ptr::copy_nonoverlapping(wide.as_ptr(), dest, wide.len());
+            let _ = GlobalUnlock(hglobal);
+
+            if OpenClipboard(None).is_err() {
+                let _ = GlobalFree(Some(hglobal));
+                return Err("Failed to open clipboard".to_string());
+            }
+
+            let _ = EmptyClipboard();
+            let set_res = SetClipboardData(CF_HDROP.0 as u32, Some(HANDLE(hglobal.0)));
+            let _ = CloseClipboard();
+
+            if set_res.is_err() {
+                let _ = GlobalFree(Some(hglobal));
+                return Err("Failed to copy file to clipboard".to_string());
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn show_windows_share_sheet(hwnd_raw: isize, path: &str) -> Result<(), String> {
+        let file_path = path.to_string();
+        let file_name = std::path::Path::new(path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "File".to_string());
+
+        unsafe {
+            let interop: IDataTransferManagerInterop =
+                windows::core::factory::<DataTransferManager, IDataTransferManagerInterop>()
+                    .map_err(|e| format!("Windows Share is unavailable: {}", e))?;
+
+            let hwnd = HWND(hwnd_raw as *mut _);
+            let dtm: DataTransferManager = interop
+                .GetForWindow(hwnd)
+                .map_err(|e| format!("Failed to initialize Windows Share: {}", e))?;
+
+            let handler = TypedEventHandler::<DataTransferManager, DataRequestedEventArgs>::new(
+                move |_sender, args| {
+                    if let Some(args) = args.as_ref() {
+                        let request = args.Request()?;
+                        let deferral = request.GetDeferral()?;
+                        let data = request.Data()?;
+                        data.Properties()?.SetTitle(&HSTRING::from(&file_name))?;
+
+                        let storage_file =
+                            StorageFile::GetFileFromPathAsync(&HSTRING::from(&file_path))?.join()?;
+                        let storage_item: IStorageItem = storage_file.cast()?;
+                        let list = windows_collections::IIterable::<IStorageItem>::from(vec![Some(
+                            storage_item,
+                        )]);
+                        data.SetStorageItems(&list, true)?;
+                        deferral.Complete()?;
+                    }
+                    Ok(())
+                },
+            );
+
+            let _token = dtm
+                .DataRequested(&handler)
+                .map_err(|e| format!("Failed to attach share handler: {}", e))?;
+
+            interop
+                .ShowShareUIForWindow(hwnd)
+                .map_err(|e| format!("Failed to open Windows Share dialog: {}", e))?;
+        }
+
+        Ok(())
+    }
+}
+
+fn load_applications_entries() -> Result<Vec<FileEntry>, String> {
+    #[cfg(target_os = "windows")]
+    {
+        win_shell::enumerate_apps()
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let listing = list_fs_directory(Path::new("/Applications"))?;
+        Ok(listing
+            .entries
+            .into_iter()
+            .map(|mut e| {
+                e.entry_kind = "app".to_string();
+                e.is_dir = false;
+                e
+            })
+            .collect())
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        Ok(Vec::new())
+    }
+}
+
+fn list_applications(cache: &AppsCache) -> Result<DirectoryListing, String> {
+    let (_home, home_path, home_name) = home_info()?;
+    let entries = cache.get_or_wait()?;
+
+    Ok(DirectoryListing {
+        current_path: "virtual://applications".to_string(),
+        current_name: "Applications".to_string(),
+        home_path,
+        home_name,
+        breadcrumbs: vec![BreadcrumbItem {
+            name: "Applications".to_string(),
+            path: "virtual://applications".to_string(),
+        }],
+        entries,
+        empty_message: Some("No applications found".to_string()),
+    })
+}
+
+fn list_computer() -> Result<DirectoryListing, String> {
+    #[cfg(target_os = "windows")]
+    {
+        let (_home, home_path, home_name) = home_info()?;
+        let entries = win_shell::enumerate_drives(false);
+        Ok(DirectoryListing {
+            current_path: "virtual://computer".to_string(),
+            current_name: "Drives".to_string(),
+            home_path,
+            home_name,
+            breadcrumbs: vec![BreadcrumbItem {
+                name: "Drives".to_string(),
+                path: "virtual://computer".to_string(),
+            }],
+            entries,
+            empty_message: Some("No drives found".to_string()),
+        })
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        list_fs_directory(Path::new("/"))
+    }
+}
+
+fn list_network() -> Result<DirectoryListing, String> {
+    let (_home, home_path, home_name) = home_info()?;
+
+    #[cfg(target_os = "windows")]
+    let entries = win_shell::enumerate_drives(true);
+
+    #[cfg(not(target_os = "windows"))]
+    let entries = Vec::new();
+
+    Ok(DirectoryListing {
+        current_path: "virtual://network".to_string(),
+        current_name: "Network".to_string(),
+        home_path,
+        home_name,
+        breadcrumbs: vec![BreadcrumbItem {
+            name: "Network".to_string(),
+            path: "virtual://network".to_string(),
+        }],
+        entries,
+        empty_message: Some("No network drives connected".to_string()),
+    })
+}
+
+#[tauri::command]
+fn get_home_dir() -> Result<String, String> {
+    let (_, home_path, _) = home_info()?;
+    Ok(home_path)
+}
+
+#[tauri::command]
+fn get_sidebar_locations() -> Result<SidebarLocations, String> {
+    let (_, home_path, home_name) = home_info()?;
+    Ok(SidebarLocations {
+        home_path,
+        home_name,
+        desktop_path: dirs::desktop_dir().map(|p| p.to_string_lossy().into_owned()),
+        documents_path: dirs::document_dir().map(|p| p.to_string_lossy().into_owned()),
+        downloads_path: dirs::download_dir().map(|p| p.to_string_lossy().into_owned()),
+    })
+}
+
+#[tauri::command]
+async fn list_directory(
+    path: Option<String>,
+    apps_cache: tauri::State<'_, Arc<AppsCache>>,
+) -> Result<DirectoryListing, String> {
+    let target = path.unwrap_or_default();
+    let cache = Arc::clone(apps_cache.inner());
+
+    tauri::async_runtime::spawn_blocking(move || match target.as_str() {
+        "" => {
+            let (home, _, _) = home_info()?;
+            list_fs_directory(&home)
+        }
+        "virtual://recents" => list_recents(),
+        "virtual://applications" => list_applications(&cache),
+        "virtual://computer" => list_computer(),
+        "virtual://network" => list_network(),
+        raw => list_fs_directory(Path::new(raw)),
+    })
+    .await
+    .map_err(|e| format!("Failed to load location: {}", e))?
+}
+
+#[tauri::command]
+fn open_item(path: String, entry_kind: String) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        use std::process::Command;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+        if entry_kind == "app" {
+            let aumid = path.strip_prefix("app://").unwrap_or(&path);
+            Command::new("explorer.exe")
+                .arg(format!("shell:AppsFolder\\{}", aumid))
+                .creation_flags(CREATE_NO_WINDOW)
+                .spawn()
+                .map_err(|e| format!("Failed to launch application: {}", e))?;
+            return Ok(());
+        }
+
+        Command::new("cmd")
+            .args(["/C", "start", "", &path])
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .map_err(|e| format!("Failed to open item: {}", e))?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let _ = entry_kind;
+        std::process::Command::new("open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| format!("Failed to open item: {}", e))?;
+        Ok(())
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        let _ = entry_kind;
+        std::process::Command::new("xdg-open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| format!("Failed to open item: {}", e))?;
+        Ok(())
+    }
+}
+
+#[tauri::command]
+async fn show_context_menu(
+    window: tauri::Window,
+    path: String,
+    entry_kind: String,
+) -> Result<bool, String> {
+    #[cfg(target_os = "windows")]
+    {
+        let hwnd_raw = window
+            .hwnd()
+            .map_err(|e| format!("Failed to get window handle: {}", e))?
+            .0 as isize;
+        let (tx, rx) = std::sync::mpsc::channel();
+        window
+            .run_on_main_thread(move || {
+                let res = win_shell::show_shell_context_menu(hwnd_raw, &path, &entry_kind);
+                let _ = tx.send(res);
+            })
+            .map_err(|e| format!("Failed to dispatch context menu: {}", e))?;
+
+        tauri::async_runtime::spawn_blocking(move || {
+            rx.recv()
+                .map_err(|_| "Context menu task cancelled".to_string())?
+        })
+        .await
+        .map_err(|e| format!("Context menu failed: {}", e))?
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (window, path, entry_kind);
+        Ok(false)
+    }
+}
+
+#[tauri::command]
+fn copy_file_to_clipboard(path: String) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        win_shell::copy_file_to_clipboard(&path)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = path;
+        Err("Copy File is not yet implemented on this OS".to_string())
+    }
+}
+
+#[tauri::command]
+fn reveal_in_file_manager(path: String) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        use std::process::Command;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        Command::new("explorer.exe")
+            .arg(format!("/select,{}", path))
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .map_err(|e| format!("Failed to open File Explorer: {}", e))?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .args(["-R", &path])
+            .spawn()
+            .map_err(|e| format!("Failed to reveal in Finder: {}", e))?;
+        Ok(())
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        let parent = Path::new(&path)
+            .parent()
+            .unwrap_or_else(|| Path::new(&path));
+        std::process::Command::new("xdg-open")
+            .arg(parent)
+            .spawn()
+            .map_err(|e| format!("Failed to open file manager: {}", e))?;
+        Ok(())
+    }
+}
+
+#[tauri::command]
+async fn share_with_os(window: tauri::Window, path: String) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let hwnd_raw = window
+            .hwnd()
+            .map_err(|e| format!("Failed to get window handle: {}", e))?
+            .0 as isize;
+        let (tx, rx) = std::sync::mpsc::channel();
+        window
+            .run_on_main_thread(move || {
+                let res = win_shell::show_windows_share_sheet(hwnd_raw, &path);
+                let _ = tx.send(res);
+            })
+            .map_err(|e| format!("Failed to open Windows Share: {}", e))?;
+
+        tauri::async_runtime::spawn_blocking(move || {
+            rx.recv()
+                .map_err(|_| "Windows Share task cancelled".to_string())?
+        })
+        .await
+        .map_err(|e| format!("Windows Share failed: {}", e))?
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (window, path);
+        Err("Native OS Share is not yet implemented on this OS".to_string())
+    }
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    let apps_cache = AppsCache::new();
+    apps_cache.start_preload();
+
+    tauri::Builder::default()
+        .manage(apps_cache)
+        .invoke_handler(tauri::generate_handler![
+            get_home_dir,
+            get_sidebar_locations,
+            list_directory,
+            open_item,
+            show_context_menu,
+            copy_file_to_clipboard,
+            reveal_in_file_manager,
+            share_with_os
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running WinFinder");
+}
