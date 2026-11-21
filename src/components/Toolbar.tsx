@@ -23,6 +23,7 @@ import {
   Share2,
   Settings,
   Plus,
+  Pencil,
 } from "lucide-react";
 import type { FileEntry, SortConfig, SortField, ViewMode } from "../types";
 
@@ -50,6 +51,8 @@ interface ToolbarProps {
   canToggleTabBar: boolean;
   onToggleTabBar: () => void;
   onNewFolder: () => void;
+  canRenameSelected: boolean;
+  onRename: () => void;
   onGoToPath: () => void;
   onToggleShowHidden: () => void;
   onOpenInTerminal: () => void;
@@ -100,6 +103,8 @@ export const Toolbar: React.FC<ToolbarProps> = ({
   canToggleTabBar,
   onToggleTabBar,
   onNewFolder,
+  canRenameSelected,
+  onRename,
   onGoToPath,
   onToggleShowHidden,
   onOpenInTerminal,
@@ -533,6 +538,23 @@ export const Toolbar: React.FC<ToolbarProps> = ({
                   <FolderPlus size={13} strokeWidth={2} />
                 </span>
                 <span>New Folder</span>
+              </button>
+
+              <button
+                type="button"
+                role="menuitem"
+                className="sort-menu-item"
+                disabled={!canRenameSelected}
+                onClick={() => {
+                  setActionsMenuOpen(false);
+                  onRename();
+                }}
+              >
+                <span className="sort-check-slot">
+                  <Pencil size={13} strokeWidth={2} />
+                </span>
+                <span className="menu-item-label">Rename…</span>
+                <span className="menu-item-shortcut">F2</span>
               </button>
 
               <button

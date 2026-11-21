@@ -14,6 +14,7 @@ import {
   Lock,
   X,
   Search,
+  AlertCircle,
 } from "lucide-react";
 import type {
   BitlockerNotice,
@@ -85,6 +86,11 @@ interface MainViewProps {
   onExpandedPathsChange: (paths: string[]) => void;
   onColumnPathsChange: (paths: string[]) => void;
   onStartFolderDrag?: (folder: FavoriteFolder, e: React.PointerEvent) => void;
+  renamingPath?: string | null;
+  renameError?: string | null;
+  onCommitRename?: (entry: FileEntry, newName: string) => Promise<string | null>;
+  onCancelRename?: () => void;
+  onDismissRenameError?: () => void;
   isTrashView?: boolean;
   emptyingTrash?: boolean;
   onEmptyTrash?: () => void;
@@ -118,6 +124,82 @@ type FlatListRow =
 
 const isTauriRuntime = () =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
+interface InlineRenameInputProps {
+  entry: FileEntry;
+  variant: "icon" | "list" | "column" | "gallery";
+  onCommit: (newName: string) => void;
+  onCancel: () => void;
+}
+
+const InlineRenameInput: React.FC<InlineRenameInputProps> = ({
+  entry,
+  variant,
+  onCommit,
+  onCancel,
+}) => {
+  const [value, setValue] = useState(entry.name);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const settledRef = useRef(false);
+
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.focus();
+    if (entry.isDir) {
+      el.select();
+    } else {
+      const lastDot = entry.name.lastIndexOf(".");
+      if (lastDot > 0) {
+        el.setSelectionRange(0, lastDot);
+      } else {
+        el.select();
+      }
+    }
+  }, [entry.isDir, entry.name]);
+
+  const finishCommit = () => {
+    if (settledRef.current) return;
+    settledRef.current = true;
+    onCommit(value);
+  };
+
+  const finishCancel = () => {
+    if (settledRef.current) return;
+    settledRef.current = true;
+    onCancel();
+  };
+
+  return (
+    <input
+      ref={inputRef}
+      type="text"
+      className={`rename-inline-input rename-input-${variant}`}
+      value={value}
+      aria-label={`Rename ${entry.name}`}
+      onChange={(e) => setValue(e.target.value)}
+      onClick={(e) => e.stopPropagation()}
+      onDoubleClick={(e) => e.stopPropagation()}
+      onMouseDown={(e) => e.stopPropagation()}
+      onPointerDown={(e) => e.stopPropagation()}
+      onContextMenu={(e) => e.stopPropagation()}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          e.stopPropagation();
+          finishCommit();
+        } else if (e.key === "Escape") {
+          e.preventDefault();
+          e.stopPropagation();
+          finishCancel();
+        }
+      }}
+      onBlur={() => {
+        finishCommit();
+      }}
+    />
+  );
+};
 
 function renderBreadcrumbIcon(crumb: BreadcrumbItem, index: number, homePath: string) {
   if (crumb.path === "virtual://recents") {
@@ -170,6 +252,11 @@ export const MainView: React.FC<MainViewProps> = ({
   onExpandedPathsChange,
   onColumnPathsChange,
   onStartFolderDrag,
+  renamingPath = null,
+  renameError = null,
+  onCommitRename,
+  onCancelRename,
+  onDismissRenameError,
   isTrashView = false,
   emptyingTrash = false,
   onEmptyTrash,
@@ -203,8 +290,103 @@ export const MainView: React.FC<MainViewProps> = ({
   const isDraggableFavoriteFolder = (entry: FileEntry): boolean =>
     !isTrashView && entry.isDir && !entry.path.startsWith("virtual://");
 
+  const isRenamingEntry = (entry: FileEntry): boolean =>
+    renamingPath !== null && normalizePathKey(renamingPath) === normalizePathKey(entry.path);
+
+  const handleRenameCommit = async (entry: FileEntry, newName: string) => {
+    const newPath = await onCommitRename?.(entry, newName);
+    if (!newPath || !isTauriRuntime()) return;
+
+    const parentPath = getParentPath(entry.path);
+    const parentKey = parentPath ? normalizePathKey(parentPath) : null;
+    const oldKey = normalizePathKey(entry.path);
+    const newKey = normalizePathKey(newPath);
+
+    // Refresh expanded List View subfolder if the renamed item lives inside one
+    if (parentKey && expandedFolders[parentKey]) {
+      try {
+        const refreshed = await invoke<DirectoryListing>("list_directory", {
+          path: expandedFolders[parentKey].path,
+          showHidden,
+        });
+        setCachedDirectory(refreshed.currentPath, showHidden, refreshed);
+        setExpandedFolders((prev) => {
+          const next = { ...prev };
+          if (next[parentKey]) {
+            next[parentKey] = {
+              path: refreshed.currentPath,
+              entries: refreshed.entries,
+              loading: false,
+              error: null,
+            };
+          }
+          if (entry.isDir && next[oldKey]) {
+            const moved = next[oldKey];
+            delete next[oldKey];
+            next[newKey] = { ...moved, path: newPath };
+          }
+          return next;
+        });
+        const matched = refreshed.entries.find((e) => normalizePathKey(e.path) === newKey);
+        if (matched) {
+          onSelect(matched);
+        }
+      } catch {
+        // Ignore if expanded folder is no longer accessible
+      }
+    }
+
+    // Refresh Miller Columns sub-column if the renamed item lives inside one
+    const subColIdx = parentKey
+      ? subColumns.findIndex((c) => normalizePathKey(c.path) === parentKey)
+      : -1;
+    if (subColIdx !== -1) {
+      const targetColPath = subColumns[subColIdx].path;
+      try {
+        const refreshed = await invoke<DirectoryListing>("list_directory", {
+          path: targetColPath,
+          showHidden,
+        });
+        setCachedDirectory(refreshed.currentPath, showHidden, refreshed);
+        const matched = refreshed.entries.find((e) => normalizePathKey(e.path) === newKey);
+        setSubColumns((prev) =>
+          prev.map((col, idx) => {
+            if (idx === subColIdx) {
+              return {
+                ...col,
+                entries: refreshed.entries,
+                selectedPath: matched ? matched.path : col.selectedPath,
+                loading: false,
+                error: null,
+              };
+            }
+            if (entry.isDir && normalizePathKey(col.path) === oldKey) {
+              return { ...col, path: newPath };
+            }
+            return col;
+          })
+        );
+        if (matched) {
+          onSelect(matched);
+          if (columnPreview && normalizePathKey(columnPreview.path) === oldKey) {
+            setColumnPreview(matched);
+          }
+        }
+      } catch {
+        // Ignore if sub-column is no longer accessible
+      }
+    } else if (entry.isDir) {
+      // If a root-column folder that was open in subColumns[0] was renamed, update its column path
+      setSubColumns((prev) =>
+        prev.map((col) =>
+          normalizePathKey(col.path) === oldKey ? { ...col, path: newPath } : col
+        )
+      );
+    }
+  };
+
   const getFolderDragProps = (entry: FileEntry) => {
-    if (!isDraggableFavoriteFolder(entry)) return {};
+    if (!isDraggableFavoriteFolder(entry) || isRenamingEntry(entry)) return {};
     return {
       onPointerDown: (e: React.PointerEvent) => {
         if (e.button !== 0 || e.ctrlKey || e.metaKey) return;
@@ -1214,6 +1396,7 @@ export const MainView: React.FC<MainViewProps> = ({
                 const isSelected =
                   selectedPath !== null && normalizePathKey(selectedPath) === entryKey;
                 const isExpanded = Boolean(expandedFolders[entryKey]);
+                const isRenaming = isRenamingEntry(entry);
                 return (
                   <div
                     key={entry.path}
@@ -1227,10 +1410,11 @@ export const MainView: React.FC<MainViewProps> = ({
                     role="row"
                     tabIndex={0}
                     style={listGridStyle}
-                    className={`list-row ${idx % 2 === 1 ? "alt" : ""} ${isSelected ? "selected" : ""}`}
+                    className={`list-row ${idx % 2 === 1 ? "alt" : ""} ${isSelected ? "selected" : ""} ${isRenaming ? "is-renaming" : ""}`}
                     {...getFolderDragProps(entry)}
                     onClick={(e) => {
                       e.stopPropagation();
+                      if (isRenaming) return;
                       if (entry.isDir && (e.ctrlKey || e.metaKey)) {
                         e.preventDefault();
                         onOpenFolderInNewTab?.(entry.path);
@@ -1253,6 +1437,7 @@ export const MainView: React.FC<MainViewProps> = ({
                     }}
                     onDoubleClick={(e) => {
                       e.stopPropagation();
+                      if (isRenaming) return;
                       if (entry.isDir) {
                         onOpenFolder(entry.path);
                       } else {
@@ -1292,7 +1477,16 @@ export const MainView: React.FC<MainViewProps> = ({
                           size={18}
                         />
                       </span>
-                      <span className="list-name-text">{entry.name}</span>
+                      {isRenaming ? (
+                        <InlineRenameInput
+                          entry={entry}
+                          variant="list"
+                          onCommit={(nextName) => void handleRenameCommit(entry, nextName)}
+                          onCancel={() => onCancelRename?.()}
+                        />
+                      ) : (
+                        <span className="list-name-text">{entry.name}</span>
+                      )}
                     </span>
                     {isSearchView && (
                       <span className="list-cell col-path" title={entry.path}>
@@ -1346,6 +1540,37 @@ export const MainView: React.FC<MainViewProps> = ({
                       const isTrail =
                         colIdx < allMillerColumns.length - 1 &&
                         normalizePathKey(allMillerColumns[colIdx + 1].path) === entryKey;
+                      const isRenaming = isRenamingEntry(entry);
+                      if (isRenaming) {
+                        return (
+                          <div
+                            key={entry.path}
+                            className="miller-row selected is-renaming"
+                            title={entry.isLocked ? `${entry.name} (BitLocker Locked)` : entry.name}
+                          >
+                            <span className="miller-icon-slot">
+                              <FileIcon
+                                name={entry.name}
+                                isDir={entry.isDir}
+                                entryKind={entry.entryKind}
+                                extension={entry.extension}
+                                iconDataUrl={entry.iconDataUrl}
+                                isLocked={entry.isLocked}
+                                size={18}
+                              />
+                            </span>
+                            <InlineRenameInput
+                              entry={entry}
+                              variant="column"
+                              onCommit={(nextName) => void handleRenameCommit(entry, nextName)}
+                              onCancel={() => onCancelRename?.()}
+                            />
+                            {entry.isDir && (
+                              <ChevronRight size={13} strokeWidth={2} className="miller-chevron" />
+                            )}
+                          </div>
+                        );
+                      }
                       return (
                         <button
                           key={entry.path}
@@ -1510,7 +1735,16 @@ export const MainView: React.FC<MainViewProps> = ({
                     size={124}
                   />
                 </div>
-                <div className="gallery-hero-name">{galleryActiveItem.name}</div>
+                {isRenamingEntry(galleryActiveItem) ? (
+                  <InlineRenameInput
+                    entry={galleryActiveItem}
+                    variant="gallery"
+                    onCommit={(nextName) => void handleRenameCommit(galleryActiveItem, nextName)}
+                    onCancel={() => onCancelRename?.()}
+                  />
+                ) : (
+                  <div className="gallery-hero-name">{galleryActiveItem.name}</div>
+                )}
                 <div className="gallery-hero-meta">
                   <span>{getKindLabel(galleryActiveItem)}</span>
                   {formatFileSize(galleryActiveItem) !== "--" && (
@@ -1597,6 +1831,35 @@ export const MainView: React.FC<MainViewProps> = ({
       <div className="icon-grid" onClick={handleCanvasClick}>
         {sortedEntries.map((entry) => {
           const isSelected = selectedPath === entry.path;
+          const isRenaming = isRenamingEntry(entry);
+          if (isRenaming) {
+            return (
+              <div
+                key={entry.path}
+                className="icon-tile selected is-renaming"
+                onClick={(e) => e.stopPropagation()}
+                title={entry.isLocked ? `${entry.name} (BitLocker Locked)` : entry.name}
+              >
+                <div className="icon-thumb">
+                  <FileIcon
+                    name={entry.name}
+                    isDir={entry.isDir}
+                    entryKind={entry.entryKind}
+                    extension={entry.extension}
+                    iconDataUrl={entry.iconDataUrl}
+                    isLocked={entry.isLocked}
+                    size={62}
+                  />
+                </div>
+                <InlineRenameInput
+                  entry={entry}
+                  variant="icon"
+                  onCommit={(nextName) => void handleRenameCommit(entry, nextName)}
+                  onCancel={() => onCancelRename?.()}
+                />
+              </div>
+            );
+          }
           return (
             <button
               key={entry.path}
@@ -1682,6 +1945,24 @@ export const MainView: React.FC<MainViewProps> = ({
               <X size={13} strokeWidth={2.2} />
             </button>
           </div>
+        </div>
+      )}
+
+      {renameError && (
+        <div className="rename-error-banner" role="alert">
+          <div className="rename-error-info">
+            <AlertCircle size={14} strokeWidth={2} className="rename-error-icon" aria-hidden="true" />
+            <span className="rename-error-text">{renameError}</span>
+          </div>
+          <button
+            type="button"
+            className="rename-error-dismiss"
+            onClick={() => onDismissRenameError?.()}
+            aria-label="Dismiss rename error"
+            title="Dismiss"
+          >
+            <X size={13} strokeWidth={2.2} />
+          </button>
         </div>
       )}
 

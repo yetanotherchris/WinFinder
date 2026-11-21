@@ -344,6 +344,40 @@ function labelForPendingPath(targetPath?: string, locations?: SidebarLocations |
   return parts[parts.length - 1] || targetPath;
 }
 
+function isRenamableEntry(entry: FileEntry | null, isTrash: boolean): boolean {
+  if (!entry || isTrash) return false;
+  if (entry.entryKind !== "file" && entry.entryKind !== "folder") return false;
+  if (
+    entry.path.startsWith("virtual://") ||
+    entry.path.startsWith("app://") ||
+    entry.path.startsWith("trash://")
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function replacePathPrefix(candidate: string, oldPrefix: string, newPrefix: string): string {
+  const candKey = normalizePathKey(candidate);
+  const oldKey = normalizePathKey(oldPrefix);
+  if (candKey === oldKey) return newPrefix;
+  if (isSameOrSubpath(candKey, oldKey)) {
+    const trimmedOld = oldPrefix.replace(/[\\/]+$/, "");
+    const trimmedNew = newPrefix.replace(/[\\/]+$/, "");
+    return `${trimmedNew}${candidate.slice(trimmedOld.length)}`;
+  }
+  return candidate;
+}
+
+function getParentDirPath(itemPath: string): string | null {
+  const trimmed = itemPath.replace(/[\\/]+$/, "");
+  const lastSep = Math.max(trimmed.lastIndexOf("\\"), trimmed.lastIndexOf("/"));
+  if (lastSep <= 0) return null;
+  const parent = trimmed.slice(0, lastSep);
+  if (/^[A-Za-z]:$/.test(parent)) return `${parent}\\`;
+  return parent;
+}
+
 export const App: React.FC = () => {
   const [locations, setLocations] = useState<SidebarLocations | null>(null);
   const [tabs, setTabs] = useState<TabState[]>(() => [createTabState("tab-1")]);
@@ -427,6 +461,8 @@ export const App: React.FC = () => {
   const [missingFavorite, setMissingFavorite] = useState<FavoriteFolder | null>(null);
   const [goToPathOpen, setGoToPathOpen] = useState<boolean>(false);
   const [emptyingTrash, setEmptyingTrash] = useState<boolean>(false);
+  const [renamingPath, setRenamingPath] = useState<string | null>(null);
+  const [renameError, setRenameError] = useState<string | null>(null);
   const unlockingDriveRef = useRef<string | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const searchRequestIdByTabRef = useRef<Map<string, number>>(new Map());
@@ -1315,6 +1351,12 @@ export const App: React.FC = () => {
   const activePath = pendingPath ?? listing?.currentPath ?? "";
   const trimmedSearch = searchQuery.trim();
   const isSearchMode = searchOpen && trimmedSearch.length > 0;
+  const isTrashView = !isSearchMode && activePath === "virtual://trash";
+
+  useEffect(() => {
+    setRenamingPath(null);
+    setRenameError(null);
+  }, [activeTab.id, activePath]);
 
   const clearSearch = useCallback(
     (tabId?: string) => {
@@ -2063,6 +2105,139 @@ export const App: React.FC = () => {
     }
   }, []);
 
+  const handleStartRename = useCallback(
+    (entry: FileEntry | null) => {
+      if (!isRenamableEntry(entry, isTrashView) || !entry) return;
+      setRenameError(null);
+      setSelectedEntry(entry);
+      setRenamingPath(entry.path);
+    },
+    [isTrashView, setSelectedEntry]
+  );
+
+  const handleCancelRename = useCallback(() => {
+    setRenamingPath(null);
+  }, []);
+
+  const handleCommitRename = useCallback(
+    async (entry: FileEntry, rawNewName: string): Promise<string | null> => {
+      const trimmed = rawNewName.trim();
+      if (!trimmed) {
+        setRenamingPath(null);
+        setRenameError("Name cannot be empty.");
+        return null;
+      }
+      if (trimmed === entry.name) {
+        setRenamingPath(null);
+        return null;
+      }
+
+      if (!isTauriRuntime()) {
+        const parent = getParentDirPath(entry.path);
+        const sep = entry.path.includes("\\") ? "\\" : "/";
+        const newPath = parent
+          ? `${parent.replace(/[\\/]+$/, "")}${sep}${trimmed}`
+          : trimmed;
+        const ext =
+          entry.isDir || !trimmed.includes(".")
+            ? null
+            : trimmed.slice(trimmed.lastIndexOf(".") + 1).toLowerCase() || null;
+        const updatedEntry: FileEntry = {
+          ...entry,
+          name: trimmed,
+          path: newPath,
+          extension: ext,
+        };
+        setRenamingPath(null);
+        setRenameError(null);
+        updateActiveTab((prev) => ({
+          ...prev,
+          listing: prev.listing
+            ? {
+                ...prev.listing,
+                entries: prev.listing.entries.map((item) =>
+                  normalizePathKey(item.path) === normalizePathKey(entry.path)
+                    ? updatedEntry
+                    : item
+                ),
+              }
+            : prev.listing,
+          selectedEntry: updatedEntry,
+        }));
+        return newPath;
+      }
+
+      try {
+        const newPath = await invoke<string>("rename_item", {
+          path: entry.path,
+          newName: trimmed,
+        });
+        setRenamingPath(null);
+        setRenameError(null);
+
+        invalidateCachedDirectory(entry.path);
+        const parentDir = getParentDirPath(entry.path);
+        if (parentDir) {
+          invalidateCachedDirectory(parentDir);
+        }
+
+        if (entry.isDir) {
+          const nextExpanded = expandedPathsRef.current.map((p) =>
+            replacePathPrefix(p, entry.path, newPath)
+          );
+          const nextColumns = columnPathsRef.current.map((p) =>
+            replacePathPrefix(p, entry.path, newPath)
+          );
+          if (nextExpanded.some((p, i) => p !== expandedPathsRef.current[i])) {
+            handleExpandedPathsChange(nextExpanded);
+          }
+          if (nextColumns.some((p, i) => p !== columnPathsRef.current[i])) {
+            handleColumnPathsChange(nextColumns);
+          }
+        }
+
+        if (isSearchMode) {
+          await runSearch(searchQuery);
+          const tab = tabsRef.current.find((t) => t.id === activeTabIdRef.current);
+          const matched = tab?.searchListing?.entries.find(
+            (e) => normalizePathKey(e.path) === normalizePathKey(newPath)
+          );
+          if (matched) {
+            setSelectedEntry(matched);
+          }
+        } else if (listing) {
+          invalidateCachedDirectory(listing.currentPath);
+          const refreshed = await fetchDirectory(listing.currentPath, { forceRefresh: true });
+          if (refreshed) {
+            const matched = refreshed.entries.find(
+              (e) => normalizePathKey(e.path) === normalizePathKey(newPath)
+            );
+            if (matched) {
+              setSelectedEntry(matched);
+            }
+          }
+        }
+
+        return newPath;
+      } catch (err) {
+        setRenamingPath(null);
+        setRenameError(typeof err === "string" ? err : String(err));
+        return null;
+      }
+    },
+    [
+      fetchDirectory,
+      handleColumnPathsChange,
+      handleExpandedPathsChange,
+      isSearchMode,
+      listing,
+      runSearch,
+      searchQuery,
+      setSelectedEntry,
+      updateActiveTab,
+    ]
+  );
+
   const handleContextMenu = useCallback(
     async (entry: FileEntry) => {
       if (!isTauriRuntime()) return;
@@ -2074,6 +2249,10 @@ export const App: React.FC = () => {
         });
         if (res.openInNewTab) {
           void openFolderInNewTab(entry.path);
+          return;
+        }
+        if (res.renameRequested) {
+          handleStartRename(entry);
           return;
         }
         if (
@@ -2088,7 +2267,7 @@ export const App: React.FC = () => {
         // Ignore if shell context menu cannot be shown for a virtual entry
       }
     },
-    [fetchDirectory, listing, openFolderInNewTab]
+    [fetchDirectory, handleStartRename, listing, openFolderInNewTab]
   );
 
   const handleShareWithOs = useCallback(async (entry: FileEntry) => {
@@ -2436,6 +2615,15 @@ export const App: React.FC = () => {
         return;
       }
 
+      if (e.key === "F2" && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+        const currentSel = selectedEntryRef.current;
+        if (isRenamableEntry(currentSel, isTrashView)) {
+          e.preventDefault();
+          handleStartRename(currentSel);
+          return;
+        }
+      }
+
       if ((e.altKey && e.key === "ArrowLeft") || (e.key === "Backspace" && !e.ctrlKey && !e.metaKey)) {
         e.preventDefault();
         void handleBack();
@@ -2455,6 +2643,8 @@ export const App: React.FC = () => {
     handleNewTab,
     handleOpenSearch,
     handleRemoveFavorite,
+    handleStartRename,
+    isTrashView,
     missingFavorite,
     settingsOpen,
   ]);
@@ -2540,6 +2730,8 @@ export const App: React.FC = () => {
           canToggleTabBar={tabs.length === 1}
           onToggleTabBar={() => setTabBarPinned((prev) => !prev)}
           onNewFolder={() => void handleNewFolder()}
+          canRenameSelected={isRenamableEntry(selectedEntry, isTrashView)}
+          onRename={() => handleStartRename(selectedEntry)}
           onGoToPath={() => setGoToPathOpen(true)}
           onToggleShowHidden={handleToggleShowHidden}
           onOpenInTerminal={() => void handleOpenInTerminal()}
@@ -2612,7 +2804,12 @@ export const App: React.FC = () => {
           onExpandedPathsChange={handleExpandedPathsChange}
           onColumnPathsChange={handleColumnPathsChange}
           onStartFolderDrag={handleStartFolderDrag}
-          isTrashView={!isSearchMode && activePath === "virtual://trash"}
+          renamingPath={renamingPath}
+          renameError={renameError}
+          onCommitRename={handleCommitRename}
+          onCancelRename={handleCancelRename}
+          onDismissRenameError={() => setRenameError(null)}
+          isTrashView={isTrashView}
           emptyingTrash={emptyingTrash}
           onEmptyTrash={() => void handleEmptyTrash()}
           bitlockerNotice={bitlockerNotice}

@@ -1012,7 +1012,7 @@ mod win_shell {
     };
     use windows::Foundation::TypedEventHandler;
     use windows::Storage::{IStorageItem, StorageFile};
-    use windows::core::{GUID, HSTRING, Interface, PCSTR, PCWSTR, PWSTR};
+    use windows::core::{GUID, HSTRING, Interface, PCSTR, PCWSTR, PSTR, PWSTR};
     use windows::Win32::Foundation::{
         CloseHandle, E_UNEXPECTED, GetLastError, GlobalFree, HANDLE, HWND, LPARAM, POINT,
         PROPERTYKEY, SIZE, WPARAM,
@@ -1039,9 +1039,10 @@ mod win_shell {
         BHID_EnumItems, BHID_SFUIObject, FOLDERID_AppsFolder, FOLDERID_RecycleBinFolder,
         IContextMenu, IDataTransferManagerInterop, IEnumShellItems, IShellItem, IShellItem2,
         IShellItemImageFactory, SHCreateItemFromParsingName, SHCreateItemFromRelativeName,
-        SHEmptyRecycleBinW, SHGetKnownFolderItem, ShellExecuteExW, CMF_EXPLORE, CMF_NORMAL,
-        CMIC_MASK_PTINVOKE, CMINVOKECOMMANDINFO, CMINVOKECOMMANDINFOEX, DROPFILES,
-        KF_FLAG_DEFAULT, SEE_MASK_FLAG_NO_UI, SEE_MASK_NOCLOSEPROCESS, SEE_MASK_UNICODE,
+        SHEmptyRecycleBinW, SHGetKnownFolderItem, ShellExecuteExW, CMF_CANRENAME, CMF_EXPLORE,
+        CMF_NORMAL, CMIC_MASK_PTINVOKE, CMINVOKECOMMANDINFO, CMINVOKECOMMANDINFOEX, DROPFILES,
+        GCS_VERBA, GCS_VERBW, KF_FLAG_DEFAULT, SEE_MASK_FLAG_NO_UI, SEE_MASK_NOCLOSEPROCESS,
+        SEE_MASK_UNICODE,
         SHELLEXECUTEINFOW, SHERB_NOCONFIRMATION, SHERB_NOPROGRESSUI,
         SIGDN_DESKTOPABSOLUTEPARSING, SIGDN_FILESYSPATH, SIGDN_NORMALDISPLAY,
         SIGDN_PARENTRELATIVEPARSING, SIIGBF_BIGGERSIZEOK, SIIGBF_ICONONLY,
@@ -1552,6 +1553,58 @@ mod win_shell {
         drives
     }
 
+    fn is_recycle_bin_path(path: &str) -> bool {
+        let lower = path.replace('/', "\\").to_lowercase();
+        lower.contains("\\$recycle.bin\\")
+    }
+
+    unsafe fn get_context_menu_verb(
+        context_menu: &IContextMenu,
+        verb_id: usize,
+    ) -> Option<String> {
+        let mut wide_buf = [0u16; 128];
+        if context_menu
+            .GetCommandString(
+                verb_id,
+                GCS_VERBW,
+                None,
+                PSTR(wide_buf.as_mut_ptr() as *mut u8),
+                wide_buf.len() as u32,
+            )
+            .is_ok()
+        {
+            let len = wide_buf
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(wide_buf.len());
+            if len > 0 {
+                return Some(String::from_utf16_lossy(&wide_buf[..len]));
+            }
+        }
+
+        let mut ansi_buf = [0u8; 128];
+        if context_menu
+            .GetCommandString(
+                verb_id,
+                GCS_VERBA,
+                None,
+                PSTR(ansi_buf.as_mut_ptr()),
+                ansi_buf.len() as u32,
+            )
+            .is_ok()
+        {
+            let len = ansi_buf
+                .iter()
+                .position(|&b| b == 0)
+                .unwrap_or(ansi_buf.len());
+            if len > 0 {
+                return Some(String::from_utf8_lossy(&ansi_buf[..len]).into_owned());
+            }
+        }
+
+        None
+    }
+
     pub fn show_shell_context_menu(
         hwnd_raw: isize,
         path: &str,
@@ -1559,6 +1612,11 @@ mod win_shell {
         is_dir: bool,
     ) -> Result<ContextMenuResult, String> {
         const CUSTOM_OPEN_IN_NEW_TAB_ID: usize = 0x7FFF;
+        let can_rename = (entry_kind == "file" || entry_kind == "folder")
+            && !path.starts_with("virtual://")
+            && !path.starts_with("app://")
+            && !path.starts_with("trash://")
+            && !is_recycle_bin_path(path);
         unsafe {
             let co_hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
             let should_uninit = co_hr.is_ok();
@@ -1583,12 +1641,17 @@ mod win_shell {
                 let hmenu = CreatePopupMenu()
                     .map_err(|e| format!("Failed to create popup menu: {}", e))?;
 
+                let mut query_flags = CMF_NORMAL | CMF_EXPLORE;
+                if can_rename {
+                    query_flags |= CMF_CANRENAME;
+                }
+
                 let query_res = context_menu.QueryContextMenu(
                     hmenu,
                     0,
                     1,
                     0x7FFE,
-                    CMF_NORMAL | CMF_EXPLORE,
+                    query_flags,
                 );
                 if query_res.is_err() {
                     let _ = DestroyMenu(hmenu);
@@ -1629,23 +1692,32 @@ mod win_shell {
 
                 let mut invoked = false;
                 let mut open_in_new_tab = false;
+                let mut rename_requested = false;
                 if cmd.0 as usize == CUSTOM_OPEN_IN_NEW_TAB_ID {
                     open_in_new_tab = true;
                 } else if cmd.0 > 0 {
                     let verb_id = (cmd.0 as usize) - 1;
-                    let ici = CMINVOKECOMMANDINFOEX {
-                        cbSize: size_of::<CMINVOKECOMMANDINFOEX>() as u32,
-                        fMask: SEE_MASK_UNICODE | CMIC_MASK_PTINVOKE,
-                        hwnd,
-                        lpVerb: PCSTR(verb_id as *const u8),
-                        lpVerbW: PCWSTR(verb_id as *const u16),
-                        nShow: SW_SHOWNORMAL.0,
-                        ptInvoke: pt,
-                        ..Default::default()
-                    };
-                    let _ = context_menu
-                        .InvokeCommand(&ici as *const _ as *const CMINVOKECOMMANDINFO);
-                    invoked = true;
+                    let is_rename_verb = can_rename
+                        && get_context_menu_verb(&context_menu, verb_id)
+                            .map(|verb| verb.trim().eq_ignore_ascii_case("rename"))
+                            .unwrap_or(false);
+                    if is_rename_verb {
+                        rename_requested = true;
+                    } else {
+                        let ici = CMINVOKECOMMANDINFOEX {
+                            cbSize: size_of::<CMINVOKECOMMANDINFOEX>() as u32,
+                            fMask: SEE_MASK_UNICODE | CMIC_MASK_PTINVOKE,
+                            hwnd,
+                            lpVerb: PCSTR(verb_id as *const u8),
+                            lpVerbW: PCWSTR(verb_id as *const u16),
+                            nShow: SW_SHOWNORMAL.0,
+                            ptInvoke: pt,
+                            ..Default::default()
+                        };
+                        let _ = context_menu
+                            .InvokeCommand(&ici as *const _ as *const CMINVOKECOMMANDINFO);
+                        invoked = true;
+                    }
                 }
 
                 let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
@@ -1653,6 +1725,7 @@ mod win_shell {
                 Ok(ContextMenuResult {
                     invoked,
                     open_in_new_tab,
+                    rename_requested,
                 })
             })();
 
@@ -2550,6 +2623,7 @@ fn open_item(path: String, entry_kind: String) -> Result<(), String> {
 struct ContextMenuResult {
     invoked: bool,
     open_in_new_tab: bool,
+    rename_requested: bool,
 }
 
 #[tauri::command]
@@ -2589,6 +2663,7 @@ async fn show_context_menu(
         Ok(ContextMenuResult {
             invoked: false,
             open_in_new_tab: false,
+            rename_requested: false,
         })
     }
 }
@@ -2677,6 +2752,165 @@ fn create_new_folder(parent_path: String) -> Result<String, String> {
 
     fs::create_dir(&candidate).map_err(|e| format!("Failed to create folder: {}", e))?;
     Ok(candidate.to_string_lossy().into_owned())
+}
+
+#[cfg(target_os = "windows")]
+fn is_windows_reserved_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or(name).trim_end();
+    matches!(
+        stem.to_ascii_uppercase().as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    )
+}
+
+fn validate_rename_name(raw_name: &str) -> Result<String, String> {
+    let name = raw_name.trim();
+    if name.is_empty() {
+        return Err("Name cannot be empty.".to_string());
+    }
+    if name == "." || name == ".." {
+        return Err("Invalid name.".to_string());
+    }
+    if name.contains('/') || name.contains('\\') || name.contains('\0') {
+        return Err("Name cannot contain path separators.".to_string());
+    }
+    if name.chars().any(|c| c.is_control()) {
+        return Err("Name contains invalid control characters.".to_string());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        const INVALID_WIN_CHARS: &[char] = &['<', '>', ':', '"', '|', '?', '*'];
+        if name.chars().any(|c| INVALID_WIN_CHARS.contains(&c)) {
+            return Err(
+                "Name cannot contain any of the following characters: < > : \" / \\ | ? *"
+                    .to_string(),
+            );
+        }
+        if name.ends_with('.') {
+            return Err("Name cannot end with a period.".to_string());
+        }
+        if is_windows_reserved_name(name) {
+            return Err(format!("\"{}\" is a reserved device name on Windows.", name));
+        }
+    }
+
+    let mut comps = Path::new(name).components();
+    match (comps.next(), comps.next()) {
+        (Some(Component::Normal(_)), None) => Ok(name.to_string()),
+        _ => Err("Invalid name.".to_string()),
+    }
+}
+
+fn rename_fs_item(path: &str, new_name: &str) -> Result<String, String> {
+    let trimmed_path = path.trim();
+    if trimmed_path.is_empty()
+        || trimmed_path.starts_with("virtual://")
+        || trimmed_path.starts_with("app://")
+        || trimmed_path.starts_with("trash://")
+    {
+        return Err("This item cannot be renamed.".to_string());
+    }
+
+    let source = Path::new(trimmed_path);
+    let source_meta = fs::symlink_metadata(source)
+        .map_err(|_| "The item to rename could not be found.".to_string())?;
+
+    let parent = source
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .ok_or_else(|| "Cannot rename a root drive or folder.".to_string())?;
+
+    let current_name = source
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .ok_or_else(|| "Cannot determine current item name.".to_string())?;
+
+    let validated = validate_rename_name(new_name)?;
+    if validated == current_name {
+        return Ok(source.to_string_lossy().into_owned());
+    }
+
+    let target = parent.join(&validated);
+    let is_case_only = current_name.to_lowercase() == validated.to_lowercase();
+
+    if is_case_only {
+        #[cfg(not(target_os = "windows"))]
+        {
+            if let Ok(target_meta) = fs::symlink_metadata(&target) {
+                use std::os::unix::fs::MetadataExt;
+                if target_meta.dev() != source_meta.dev() || target_meta.ino() != source_meta.ino()
+                {
+                    return Err(format!(
+                        "An item named \"{}\" already exists in this location.",
+                        validated
+                    ));
+                }
+            }
+        }
+        #[cfg(target_os = "windows")]
+        let _ = &source_meta;
+
+        let pid = std::process::id();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let mut temp_path = parent.join(format!(".winfinder-rename-tmp-{}-{}", pid, nanos));
+        let mut attempt = 0u32;
+        while fs::symlink_metadata(&temp_path).is_ok() {
+            attempt += 1;
+            temp_path = parent.join(format!(
+                ".winfinder-rename-tmp-{}-{}-{}",
+                pid, nanos, attempt
+            ));
+        }
+
+        fs::rename(source, &temp_path)
+            .map_err(|e| format!("Failed to rename \"{}\": {}", current_name, e))?;
+        if let Err(e) = fs::rename(&temp_path, &target) {
+            let _ = fs::rename(&temp_path, source);
+            return Err(format!("Failed to rename \"{}\": {}", current_name, e));
+        }
+        return Ok(target.to_string_lossy().into_owned());
+    }
+
+    if fs::symlink_metadata(&target).is_ok() {
+        return Err(format!(
+            "An item named \"{}\" already exists in this location.",
+            validated
+        ));
+    }
+
+    fs::rename(source, &target)
+        .map_err(|e| format!("Failed to rename \"{}\": {}", current_name, e))?;
+    Ok(target.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+fn rename_item(path: String, new_name: String) -> Result<String, String> {
+    rename_fs_item(&path, &new_name)
 }
 
 #[tauri::command]
@@ -3211,6 +3445,7 @@ pub fn run() {
             copy_file_to_clipboard,
             reveal_in_file_manager,
             create_new_folder,
+            rename_item,
             open_in_terminal,
             share_with_os,
             load_app_state,
@@ -3752,6 +3987,7 @@ mod tests {
 
         store.update_settings(AppSettings {
             use_windows_window_controls: true,
+            ..AppSettings::default()
         });
 
         let config_path = fake_home.join(".winfinder").join("config.json");
@@ -3820,9 +4056,70 @@ mod tests {
         // Subsequent save succeeds into ~/.winfinder/config.json
         store.update_settings(AppSettings {
             use_windows_window_controls: true,
+            ..AppSettings::default()
         });
         assert!(fake_home.join(".winfinder").join("config.json").is_file());
 
         let _ = fs::remove_dir_all(&fake_home);
+    }
+
+    #[test]
+    fn rename_fs_item_validates_renames_and_prevents_overwrites() {
+        let unique = format!(
+            "winfinder_rename_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let root = std::env::temp_dir().join(unique);
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        let file_a = root.join("notes.txt");
+        let file_b = root.join("existing.txt");
+        fs::write(&file_a, "hello").unwrap();
+        fs::write(&file_b, "world").unwrap();
+
+        // Validation errors
+        assert!(rename_fs_item(&file_a.to_string_lossy(), "   ").is_err());
+        assert!(rename_fs_item(&file_a.to_string_lossy(), "sub/name.txt").is_err());
+        assert!(rename_fs_item(&file_a.to_string_lossy(), r"sub\name.txt").is_err());
+        assert!(rename_fs_item(&file_a.to_string_lossy(), "..").is_err());
+        assert!(rename_fs_item("virtual://recents", "other").is_err());
+
+        #[cfg(target_os = "windows")]
+        {
+            assert!(rename_fs_item(&file_a.to_string_lossy(), "bad:name.txt").is_err());
+            assert!(rename_fs_item(&file_a.to_string_lossy(), "CON.txt").is_err());
+            assert!(rename_fs_item(&file_a.to_string_lossy(), "trailing.").is_err());
+        }
+
+        // Prevent overwriting a different existing entry
+        let overwrite_err = rename_fs_item(&file_a.to_string_lossy(), "existing.txt").unwrap_err();
+        assert!(overwrite_err.contains("already exists"));
+
+        // Normal rename
+        let renamed_path = rename_fs_item(&file_a.to_string_lossy(), "renamed.txt").unwrap();
+        assert_eq!(PathBuf::from(&renamed_path), root.join("renamed.txt"));
+        assert!(root.join("renamed.txt").is_file());
+        assert!(!file_a.exists());
+
+        // No-op rename returns same path
+        let noop_path = rename_fs_item(&renamed_path, "renamed.txt").unwrap();
+        assert_eq!(noop_path, renamed_path);
+
+        // Case-only rename
+        let cased_path = rename_fs_item(&renamed_path, "Renamed.TXT").unwrap();
+        assert_eq!(PathBuf::from(&cased_path), root.join("Renamed.TXT"));
+        let actual_names: Vec<String> = fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(actual_names.contains(&"Renamed.TXT".to_string()));
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

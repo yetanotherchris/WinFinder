@@ -2600,3 +2600,115 @@ body.is-dragging-folder-blocked * {
 .finder-tab-new-btn:active {
   background: rgba(0, 0, 0, 0.1);
 }
+
+/* ==================== INLINE RENAME INPUT & ERROR BANNER ==================== */
+.rename-inline-input {
+  font-family: var(--font-system);
+  color: var(--text-primary);
+  background: var(--bg-control);
+  border: 1px solid var(--accent-blue);
+  border-radius: 4px;
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(10, 132, 255, 0.28);
+  user-select: text;
+  -webkit-user-select: text;
+  margin: 0;
+  min-width: 0;
+}
+
+.rename-inline-input.rename-input-icon {
+  width: 96px;
+  max-width: 100%;
+  height: 22px;
+  padding: 1px 5px;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.25;
+  text-align: center;
+}
+
+.rename-inline-input.rename-input-list {
+  flex: 1;
+  height: 21px;
+  padding: 0 5px;
+  font-size: 12.5px;
+  line-height: 1.25;
+}
+
+.rename-inline-input.rename-input-column {
+  flex: 1;
+  height: 20px;
+  padding: 0 5px;
+  font-size: 12.5px;
+  line-height: 1.25;
+}
+
+.rename-inline-input.rename-input-gallery {
+  width: 280px;
+  max-width: 100%;
+  height: 28px;
+  padding: 2px 8px;
+  font-size: 15px;
+  font-weight: 600;
+  text-align: center;
+  border-radius: 6px;
+}
+
+.icon-tile.is-renaming .icon-thumb {
+  background: var(--icon-selected-bg);
+}
+
+.rename-error-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 14px;
+  background: rgba(217, 45, 32, 0.08);
+  border-bottom: 1px solid rgba(217, 45, 32, 0.22);
+  font-size: 12px;
+  color: var(--error-text);
+  flex-shrink: 0;
+}
+
+:root[data-theme="dark"] .rename-error-banner {
+  background: rgba(255, 69, 58, 0.14);
+  border-bottom-color: rgba(255, 105, 97, 0.28);
+}
+
+.rename-error-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.rename-error-icon {
+  flex-shrink: 0;
+  color: var(--error-text);
+}
+
+.rename-error-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rename-error-dismiss {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--error-text);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  cursor: default;
+}
+
+.rename-error-dismiss:hover {
+  background: rgba(217, 45, 32, 0.14);
+}

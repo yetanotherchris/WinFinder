@@ -131,4 +131,5 @@ export interface ResolvedGoToPath {
 export interface ContextMenuResult {
   invoked: boolean;
   openInNewTab: boolean;
+  renameRequested: boolean;
 }
