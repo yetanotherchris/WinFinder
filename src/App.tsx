@@ -60,6 +60,7 @@ function parseBitlockerLockedDrive(err: unknown): string | null {
 
 const DEFAULT_SETTINGS: AppSettings = {
   useWindowsWindowControls: false,
+  useEverythingCli: null,
 };
 
 const DEFAULT_VIEW_MODE: ViewMode = "icons";
@@ -130,6 +131,10 @@ function loadBrowserSettings(): AppSettings {
     const parsed = JSON.parse(raw);
     return {
       useWindowsWindowControls: Boolean(parsed?.useWindowsWindowControls),
+      useEverythingCli:
+        typeof parsed?.useEverythingCli === "boolean"
+          ? parsed.useEverythingCli
+          : null,
     };
   } catch {
     return DEFAULT_SETTINGS;
@@ -1069,6 +1074,10 @@ export const App: React.FC = () => {
             useWindowsWindowControls: Boolean(
               persisted?.settings?.useWindowsWindowControls
             ),
+            useEverythingCli:
+              typeof persisted?.settings?.useEverythingCli === "boolean"
+                ? persisted.settings.useEverythingCli
+                : null,
           }
         : loadBrowserSettings();
       setSettings(initialSettings);
@@ -1665,7 +1674,7 @@ export const App: React.FC = () => {
           });
         }
       } else {
-        // Excluded panels ("applications", "drives", "network"): keep session-only view/sort, never persist to ~/.winfinder
+        // Excluded panels ("applications", "drives", "network"): keep session-only view/sort, never persist to ~/.winfinder/config.json
         const ephemeral = ephemeralPanelStatesRef.current[panel];
         const nextViewMode = ephemeral?.viewMode ?? DEFAULT_VIEW_MODE;
         const nextSort = ephemeral?.sort ?? DEFAULT_SORT;
