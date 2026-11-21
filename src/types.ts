@@ -78,12 +78,14 @@ export type PanelId =
   | "trash"
   | CustomFavoritePanelId;
 
-export type TrackedPanelId =
+export type BuiltInTrackedPanelId =
   | "recents"
   | "desktop"
   | "documents"
   | "downloads"
   | "home";
+
+export type TrackedPanelId = BuiltInTrackedPanelId | CustomFavoritePanelId;
 
 export interface PanelState {
   viewMode: ViewMode;

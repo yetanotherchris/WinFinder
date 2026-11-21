@@ -16,12 +16,18 @@ import {
 import {
   countBuiltInFavorites,
   isPathInFavorites,
+  isPathWithinRoot,
   MAX_FAVORITES_ITEMS,
   normalizePathKey,
   type FavoriteDropState,
 } from "./utils/favorites";
+import {
+  buildDescendantChain,
+  resolveViewAnchorChain,
+} from "./utils/pathChain";
 import type {
   BitlockerNotice,
+  CustomFavoritePanelId,
   DirectoryListing,
   FavoriteFolder,
   FileEntry,
@@ -61,8 +67,16 @@ const TRACKED_PANEL_SET = new Set<PanelId>([
   "home",
 ]);
 
+function isCustomFavoritePanel(panel: PanelId): panel is CustomFavoritePanelId {
+  return (
+    panel.startsWith("fav:") &&
+    panel.slice(4).trim().length > 0 &&
+    !panel.slice(4).trim().startsWith("virtual://")
+  );
+}
+
 function isTrackedPanel(panel: PanelId): panel is TrackedPanelId {
-  return TRACKED_PANEL_SET.has(panel);
+  return TRACKED_PANEL_SET.has(panel) || isCustomFavoritePanel(panel);
 }
 
 function getRootPathForPanel(
@@ -184,6 +198,11 @@ export const App: React.FC = () => {
   const [sortConfig, setSortConfig] = useState<SortConfig>(DEFAULT_SORT);
   const [expandedPaths, setExpandedPaths] = useState<string[]>([]);
   const [columnPaths, setColumnPaths] = useState<string[]>([]);
+  const [revealRequest, setRevealRequest] = useState<{
+    anchorRoot: string;
+    path: string;
+    seq: number;
+  } | null>(null);
   const [customFavorites, setCustomFavorites] = useState<FavoriteFolder[]>([]);
   const [inAppDrag, setInAppDrag] = useState<InAppFolderDrag | null>(null);
   const [osDragOverFavorites, setOsDragOverFavorites] = useState<boolean>(false);
@@ -221,6 +240,8 @@ export const App: React.FC = () => {
   const dragCleanupRef = useRef<(() => void) | null>(null);
   const locationsRef = useRef<SidebarLocations | null>(locations);
   locationsRef.current = locations;
+  const listingRef = useRef<DirectoryListing | null>(listing);
+  listingRef.current = listing;
   const customFavoritesRef = useRef<FavoriteFolder[]>(customFavorites);
   customFavoritesRef.current = customFavorites;
   const showHiddenRef = useRef(showHidden);
@@ -236,6 +257,15 @@ export const App: React.FC = () => {
   viewModeRef.current = viewMode;
   const sortConfigRef = useRef<SortConfig>(sortConfig);
   sortConfigRef.current = sortConfig;
+  const listingRef = useRef<DirectoryListing | null>(listing);
+  listingRef.current = listing;
+  const selectedEntryRef = useRef<FileEntry | null>(selectedEntry);
+  selectedEntryRef.current = selectedEntry;
+  const expandedPathsRef = useRef<string[]>(expandedPaths);
+  expandedPathsRef.current = expandedPaths;
+  const columnPathsRef = useRef<string[]>(columnPaths);
+  columnPathsRef.current = columnPaths;
+  const revealSeqRef = useRef(0);
 
   const persistPanelStates = useCallback((trackedPanel?: TrackedPanelId) => {
     if (trackedPanel) {
@@ -301,17 +331,43 @@ export const App: React.FC = () => {
       if (next.length === customFavoritesRef.current.length) return;
       customFavoritesRef.current = next;
       setCustomFavorites(next);
-      persistCustomFavorites(next);
 
+      // Prune saved panel state for the removed custom favorite
+      const nextPanelStates: Partial<Record<TrackedPanelId, PanelState>> = {};
+      for (const [panelKey, state] of Object.entries(
+        panelStatesRef.current
+      ) as Array<[TrackedPanelId, PanelState | undefined]>) {
+        if (
+          !state ||
+          (panelKey.startsWith("fav:") &&
+            normalizePathKey(panelKey.slice(4)) === targetKey)
+        ) {
+          continue;
+        }
+        nextPanelStates[panelKey] = state;
+      }
+      panelStatesRef.current = nextPanelStates;
+
+      let activeWasRemoved = false;
       if (
         activePanelRef.current.startsWith("fav:") &&
         normalizePathKey(activePanelRef.current.slice(4)) === targetKey
       ) {
+        activeWasRemoved = true;
         activePanelRef.current = "home";
         setActivePanel("home");
       }
+      if (
+        lastTrackedPanelRef.current.startsWith("fav:") &&
+        normalizePathKey(lastTrackedPanelRef.current.slice(4)) === targetKey
+      ) {
+        lastTrackedPanelRef.current = "home";
+      }
+
+      persistCustomFavorites(next);
+      persistPanelStates(activeWasRemoved ? "home" : undefined);
     },
-    [persistCustomFavorites]
+    [persistCustomFavorites, persistPanelStates]
   );
 
   // Pointer-event-based in-app folder drag-and-drop into Favorites (WebView2 compatible)
@@ -761,6 +817,27 @@ export const App: React.FC = () => {
         persisted?.activePanel && isTrackedPanel(persisted.activePanel)
           ? persisted.activePanel
           : "home";
+      if (isCustomFavoritePanel(initialPanel)) {
+        const favKey = normalizePathKey(initialPanel.slice(4));
+        const matchedFav = initialFavorites.find(
+          (fav) => normalizePathKey(fav.path) === favKey
+        );
+        if (!matchedFav) {
+          initialPanel = "home";
+        } else {
+          let favRootExists = true;
+          if (isTauriRuntime()) {
+            try {
+              favRootExists = await invoke<boolean>("check_directory_exists", {
+                path: matchedFav.path,
+              });
+            } catch {
+              favRootExists = false;
+            }
+          }
+          initialPanel = favRootExists ? (`fav:${matchedFav.path}` as CustomFavoritePanelId) : "home";
+        }
+      }
       let rootPath = getRootPathForPanel(initialPanel, resolvedLocations);
       if (rootPath === null) {
         initialPanel = "home";
@@ -770,10 +847,14 @@ export const App: React.FC = () => {
       const savedPanel = panelStatesRef.current[initialPanel];
       const initialViewMode = savedPanel?.viewMode ?? DEFAULT_VIEW_MODE;
       const initialSort = savedPanel?.sort ?? DEFAULT_SORT;
-      const targetPath = await resolvePanelTarget(savedPanel?.lastPath, rootPath);
+      const validSavedLastPath =
+        savedPanel?.lastPath && isPathWithinRoot(savedPanel.lastPath, rootPath)
+          ? savedPanel.lastPath
+          : null;
+      const targetPath = await resolvePanelTarget(validSavedLastPath, rootPath);
       const sameAsSaved = Boolean(
-        savedPanel?.lastPath &&
-          targetPath.toLowerCase() === savedPanel.lastPath.toLowerCase()
+        validSavedLastPath &&
+          targetPath.toLowerCase() === validSavedLastPath.toLowerCase()
       );
       const initialExpanded = sameAsSaved ? (savedPanel?.expandedPaths ?? []) : [];
       const initialColumns = sameAsSaved ? (savedPanel?.columnPaths ?? []) : [];
@@ -877,6 +958,7 @@ export const App: React.FC = () => {
     async (path: string, panelOverride?: PanelId) => {
       const targetPanel = panelOverride ?? activePanelRef.current;
       if (activePath === path && activePanelRef.current === targetPanel && !error) return;
+      setRevealRequest(null);
       setExpandedPaths([]);
       setColumnPaths([]);
       const data = await fetchDirectory(path);
@@ -888,8 +970,15 @@ export const App: React.FC = () => {
         });
         setHistoryIndex((idx) => idx + 1);
         if (isTrackedPanel(targetPanel)) {
+          const rootPath = getRootPathForPanel(targetPanel, locationsRef.current);
+          const withinRoot = rootPath
+            ? isPathWithinRoot(data.currentPath, rootPath)
+            : true;
           updateTrackedPanelState(targetPanel, {
-            lastPath: data.currentPath,
+            lastPath:
+              !withinRoot && isCustomFavoritePanel(targetPanel)
+                ? rootPath
+                : data.currentPath,
             expandedPaths: [],
             columnPaths: [],
           });
@@ -932,6 +1021,7 @@ export const App: React.FC = () => {
       const wasSamePanel = activePanelRef.current === panel;
       activePanelRef.current = panel;
       setActivePanel(panel);
+      setRevealRequest(null);
 
       if (isTrackedPanel(panel)) {
         const saved = panelStatesRef.current[panel];
@@ -942,18 +1032,23 @@ export const App: React.FC = () => {
         setViewMode(nextViewMode);
         setSortConfig(nextSort);
 
+        const validSavedLastPath =
+          saved?.lastPath && isPathWithinRoot(saved.lastPath, rootPath)
+            ? saved.lastPath
+            : null;
+
         // Clicking the already-active panel while inside a subfolder returns to its root
         let targetPath: string;
         if (wasSamePanel) {
           targetPath = rootPath;
         } else if (
-          saved?.lastPath &&
-          getCachedDirectory(saved.lastPath, showHiddenRef.current)
+          validSavedLastPath &&
+          getCachedDirectory(validSavedLastPath, showHiddenRef.current)
         ) {
           // Fast path: already cached in memory; background revalidation handles external deletion
-          targetPath = saved.lastPath;
+          targetPath = validSavedLastPath;
         } else {
-          targetPath = await resolvePanelTarget(saved?.lastPath, rootPath);
+          targetPath = await resolvePanelTarget(validSavedLastPath, rootPath);
         }
 
         if (activePath === targetPath && !error) {
@@ -967,8 +1062,8 @@ export const App: React.FC = () => {
 
         const restoreSubState = Boolean(
           !wasSamePanel &&
-            saved?.lastPath &&
-            targetPath.toLowerCase() === saved.lastPath.toLowerCase()
+            validSavedLastPath &&
+            targetPath.toLowerCase() === validSavedLastPath.toLowerCase()
         );
         const nextExpanded = restoreSubState ? (saved?.expandedPaths ?? []) : [];
         const nextColumns = restoreSubState ? (saved?.columnPaths ?? []) : [];
@@ -1033,7 +1128,16 @@ export const App: React.FC = () => {
       setExpandedPaths(paths);
       const panel = activePanelRef.current;
       if (isTrackedPanel(panel)) {
-        updateTrackedPanelState(panel, { expandedPaths: paths });
+        const rootPath = getRootPathForPanel(panel, locationsRef.current);
+        const currentPath = listingRef.current?.currentPath;
+        if (
+          !isCustomFavoritePanel(panel) ||
+          !rootPath ||
+          !currentPath ||
+          isPathWithinRoot(currentPath, rootPath)
+        ) {
+          updateTrackedPanelState(panel, { expandedPaths: paths });
+        }
       }
     },
     [updateTrackedPanelState]
@@ -1044,7 +1148,16 @@ export const App: React.FC = () => {
       setColumnPaths(paths);
       const panel = activePanelRef.current;
       if (isTrackedPanel(panel)) {
-        updateTrackedPanelState(panel, { columnPaths: paths });
+        const rootPath = getRootPathForPanel(panel, locationsRef.current);
+        const currentPath = listingRef.current?.currentPath;
+        if (
+          !isCustomFavoritePanel(panel) ||
+          !rootPath ||
+          !currentPath ||
+          isPathWithinRoot(currentPath, rootPath)
+        ) {
+          updateTrackedPanelState(panel, { columnPaths: paths });
+        }
       }
     },
     [updateTrackedPanelState]
@@ -1052,20 +1165,116 @@ export const App: React.FC = () => {
 
   const handleChangeViewMode = useCallback(
     (nextMode: ViewMode) => {
+      const prevMode = viewModeRef.current;
       viewModeRef.current = nextMode;
       setViewMode(nextMode);
       const panel = activePanelRef.current;
-      if (isTrackedPanel(panel)) {
-        updateTrackedPanelState(panel, { viewMode: nextMode });
-      } else {
+      const currentListing = listingRef.current;
+
+      const persistEphemeral = () => {
         const prev = ephemeralPanelStatesRef.current[panel];
         ephemeralPanelStatesRef.current[panel] = {
           viewMode: nextMode,
           sort: prev?.sort ?? sortConfigRef.current,
         };
+      };
+
+      if ((nextMode === "list" || nextMode === "columns") && currentListing) {
+        const panelRoot = getRootPathForPanel(panel, locationsRef.current);
+        const chain = resolveViewAnchorChain(
+          currentListing.currentPath,
+          currentListing.breadcrumbs,
+          panelRoot
+        );
+
+        if (chain) {
+          const nextExpanded = nextMode === "list" ? chain.descendantPaths : [];
+          const nextColumns = nextMode === "columns" ? chain.descendantPaths : [];
+          expandedPathsRef.current = nextExpanded;
+          columnPathsRef.current = nextColumns;
+          setExpandedPaths(nextExpanded);
+          setColumnPaths(nextColumns);
+          setRevealRequest({
+            anchorRoot: chain.anchorRoot,
+            path: chain.targetPath,
+            seq: ++revealSeqRef.current,
+          });
+
+          if (isTrackedPanel(panel)) {
+            updateTrackedPanelState(panel, {
+              viewMode: nextMode,
+              lastPath: chain.anchorRoot,
+              expandedPaths: nextExpanded,
+              columnPaths: nextColumns,
+            });
+          } else {
+            persistEphemeral();
+          }
+
+          void fetchDirectory(chain.anchorRoot);
+          return;
+        }
+
+        // Already anchored at root: keep tree and Miller columns in sync when toggling between List and Columns
+        if (nextMode === "list" && prevMode === "columns" && columnPathsRef.current.length > 0) {
+          const synced = [...columnPathsRef.current];
+          expandedPathsRef.current = synced;
+          setExpandedPaths(synced);
+          setRevealRequest({
+            anchorRoot: currentListing.currentPath,
+            path: synced[synced.length - 1],
+            seq: ++revealSeqRef.current,
+          });
+          if (isTrackedPanel(panel)) {
+            updateTrackedPanelState(panel, {
+              viewMode: nextMode,
+              expandedPaths: synced,
+            });
+          } else {
+            persistEphemeral();
+          }
+          return;
+        }
+
+        if (nextMode === "columns" && prevMode === "list") {
+          const sel = selectedEntryRef.current;
+          const targetDir =
+            sel && sel.isDir
+              ? sel.path
+              : expandedPathsRef.current.length > 0
+                ? expandedPathsRef.current[expandedPathsRef.current.length - 1]
+                : null;
+          const subChain = targetDir
+            ? buildDescendantChain(currentListing.currentPath, targetDir)
+            : null;
+          if (subChain && subChain.length > 0) {
+            columnPathsRef.current = subChain;
+            setColumnPaths(subChain);
+            setRevealRequest({
+              anchorRoot: currentListing.currentPath,
+              path: subChain[subChain.length - 1],
+              seq: ++revealSeqRef.current,
+            });
+            if (isTrackedPanel(panel)) {
+              updateTrackedPanelState(panel, {
+                viewMode: nextMode,
+                columnPaths: subChain,
+              });
+            } else {
+              persistEphemeral();
+            }
+            return;
+          }
+        }
+      }
+
+      if (isTrackedPanel(panel)) {
+        updateTrackedPanelState(panel, { viewMode: nextMode });
+      } else {
+        persistEphemeral();
       }
     },
-    [updateTrackedPanelState]
+    [fetchDirectory, updateTrackedPanelState]
   );
 
   const handleChangeSort = useCallback(
@@ -1260,6 +1469,7 @@ export const App: React.FC = () => {
       const targetPanel = entry.panel;
       activePanelRef.current = targetPanel;
       setActivePanel(targetPanel);
+      setRevealRequest(null);
 
       if (isTrackedPanel(targetPanel)) {
         const saved = panelStatesRef.current[targetPanel];
@@ -1291,7 +1501,16 @@ export const App: React.FC = () => {
       if (data) {
         setHistoryIndex(nextIndex);
         if (isTrackedPanel(targetPanel)) {
-          updateTrackedPanelState(targetPanel, { lastPath: data.currentPath });
+          const rootPath = getRootPathForPanel(targetPanel, locationsRef.current);
+          const withinRoot = rootPath
+            ? isPathWithinRoot(data.currentPath, rootPath)
+            : true;
+          updateTrackedPanelState(targetPanel, {
+            lastPath:
+              !withinRoot && isCustomFavoritePanel(targetPanel)
+                ? rootPath
+                : data.currentPath,
+          });
         }
       }
     },
@@ -1419,6 +1638,7 @@ export const App: React.FC = () => {
           showHidden={showHidden}
           expandedPaths={expandedPaths}
           columnPaths={columnPaths}
+          revealRequest={revealRequest}
           loading={loading}
           loadingMessage={loadingMessage}
           error={error}
