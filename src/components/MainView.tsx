@@ -10,6 +10,7 @@ import {
   LayoutGrid,
   HardDrive,
   Globe,
+  Trash2,
 } from "lucide-react";
 import type {
   BreadcrumbItem,
@@ -56,6 +57,9 @@ interface MainViewProps {
   onChangeSort: (next: SortConfig) => void;
   onExpandedPathsChange: (paths: string[]) => void;
   onColumnPathsChange: (paths: string[]) => void;
+  isTrashView?: boolean;
+  emptyingTrash?: boolean;
+  onEmptyTrash?: () => void;
 }
 
 interface MillerColumn {
@@ -92,6 +96,9 @@ function renderBreadcrumbIcon(crumb: BreadcrumbItem, index: number, homePath: st
   if (crumb.path === "virtual://network") {
     return <Globe size={12} strokeWidth={2} className="pathbar-icon drive-icon" />;
   }
+  if (crumb.path === "virtual://trash") {
+    return <Trash2 size={12} strokeWidth={2} className="pathbar-icon drive-icon" />;
+  }
   if (index === 0 && crumb.path.toLowerCase() === homePath.toLowerCase()) {
     return <Home size={12} strokeWidth={2} className="pathbar-icon home-icon" />;
   }
@@ -120,7 +127,28 @@ export const MainView: React.FC<MainViewProps> = ({
   onChangeSort,
   onExpandedPathsChange,
   onColumnPathsChange,
+  isTrashView = false,
+  emptyingTrash = false,
+  onEmptyTrash,
 }) => {
+  const [confirmEmptyOpen, setConfirmEmptyOpen] = useState(false);
+
+  useEffect(() => {
+    if (!isTrashView) {
+      setConfirmEmptyOpen(false);
+    }
+  }, [isTrashView]);
+
+  useEffect(() => {
+    if (!confirmEmptyOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setConfirmEmptyOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [confirmEmptyOpen]);
   const sortedEntries = useMemo(
     () => sortEntries(entries, sortConfig),
     [entries, sortConfig]
@@ -1256,8 +1284,38 @@ export const MainView: React.FC<MainViewProps> = ({
     );
   };
 
+  const canEmptyTrash = isTrashView && !loading && !emptyingTrash && sortedEntries.length > 0;
+
   return (
     <div className="finder-main-wrapper">
+      {isTrashView && (
+        <div className="trash-header-panel" role="region" aria-label="Trash actions">
+          <div className="trash-header-info">
+            <Trash2 size={14} strokeWidth={1.85} className="trash-header-icon" aria-hidden="true" />
+            <span className="trash-header-text">
+              {loading
+                ? "Loading Trash…"
+                : sortedEntries.length === 0
+                  ? "Trash is empty"
+                  : `${sortedEntries.length} ${sortedEntries.length === 1 ? "item" : "items"} in Trash`}
+            </span>
+          </div>
+          <button
+            type="button"
+            className="trash-empty-btn"
+            disabled={!canEmptyTrash}
+            onClick={() => setConfirmEmptyOpen(true)}
+            title={
+              sortedEntries.length === 0
+                ? "Trash is already empty"
+                : "Permanently erase all items in the Trash"
+            }
+          >
+            {emptyingTrash ? "Emptying…" : "Empty"}
+          </button>
+        </div>
+      )}
+
       <main
         className={`finder-canvas view-${viewMode}`}
         onClick={handleCanvasClick}
@@ -1265,6 +1323,52 @@ export const MainView: React.FC<MainViewProps> = ({
       >
         {renderBody()}
       </main>
+
+      {confirmEmptyOpen && (
+        <div
+          className="finder-modal-backdrop"
+          role="presentation"
+          onClick={() => setConfirmEmptyOpen(false)}
+        >
+          <div
+            className="finder-modal-dialog"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="empty-trash-title"
+            aria-describedby="empty-trash-desc"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="finder-modal-icon">
+              <Trash2 size={28} strokeWidth={1.6} />
+            </div>
+            <h2 id="empty-trash-title" className="finder-modal-title">
+              Are you sure you want to permanently erase the items in the Trash?
+            </h2>
+            <p id="empty-trash-desc" className="finder-modal-desc">
+              You can&apos;t undo this action.
+            </p>
+            <div className="finder-modal-actions">
+              <button
+                type="button"
+                className="finder-modal-btn secondary"
+                onClick={() => setConfirmEmptyOpen(false)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="finder-modal-btn destructive"
+                onClick={() => {
+                  setConfirmEmptyOpen(false);
+                  onEmptyTrash?.();
+                }}
+              >
+                Empty Trash
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Bottom Path Bar */}
       <div className="finder-pathbar" aria-label="Path bar">
