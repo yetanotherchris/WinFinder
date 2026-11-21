@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { AlertTriangle } from "lucide-react";
 import { Sidebar } from "./components/Sidebar";
 import { Toolbar } from "./components/Toolbar";
 import { MainView } from "./components/MainView";
@@ -10,8 +12,15 @@ import {
   listingsEqual,
   setCachedDirectory,
 } from "./utils/dirCache";
+import {
+  countBuiltInFavorites,
+  isPathInFavorites,
+  MAX_FAVORITES_ITEMS,
+  normalizePathKey,
+} from "./utils/favorites";
 import type {
   DirectoryListing,
+  FavoriteFolder,
   FileEntry,
   PanelId,
   PanelState,
@@ -45,6 +54,9 @@ function getRootPathForPanel(
   panel: PanelId,
   locs: SidebarLocations | null
 ): string | null {
+  if (panel.startsWith("fav:")) {
+    return panel.slice(4);
+  }
   switch (panel) {
     case "recents":
       return "virtual://recents";
@@ -62,6 +74,28 @@ function getRootPathForPanel(
       return "virtual://computer";
     case "network":
       return "virtual://network";
+    default:
+      return null;
+  }
+}
+
+const LOCAL_FAVORITES_STORAGE_KEY = "winfinder.customFavorites";
+
+function loadBrowserCustomFavorites(): FavoriteFolder[] {
+  try {
+    const raw = window.localStorage.getItem(LOCAL_FAVORITES_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (item): item is FavoriteFolder =>
+        Boolean(item) &&
+        typeof item.name === "string" &&
+        typeof item.path === "string" &&
+        item.path.trim().length > 0
+    );
+  } catch {
+    return [];
   }
 }
 
@@ -123,10 +157,19 @@ export const App: React.FC = () => {
   const [sortConfig, setSortConfig] = useState<SortConfig>(DEFAULT_SORT);
   const [expandedPaths, setExpandedPaths] = useState<string[]>([]);
   const [columnPaths, setColumnPaths] = useState<string[]>([]);
+  const [customFavorites, setCustomFavorites] = useState<FavoriteFolder[]>([]);
+  const [draggingFolder, setDraggingFolder] = useState<FavoriteFolder | null>(null);
+  const [osDragOverFavorites, setOsDragOverFavorites] = useState<boolean>(false);
+  const [missingFavorite, setMissingFavorite] = useState<FavoriteFolder | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
   const requestIdRef = useRef(0);
   const loadingTimerRef = useRef<number | null>(null);
+  const favoritesSectionRef = useRef<HTMLDivElement | null>(null);
+  const locationsRef = useRef<SidebarLocations | null>(locations);
+  locationsRef.current = locations;
+  const customFavoritesRef = useRef<FavoriteFolder[]>(customFavorites);
+  customFavoritesRef.current = customFavorites;
   const showHiddenRef = useRef(showHidden);
   showHiddenRef.current = showHidden;
   const activePanelRef = useRef<PanelId>(activePanel);
@@ -151,6 +194,72 @@ export const App: React.FC = () => {
       panels: panelStatesRef.current,
     });
   }, []);
+
+  const persistCustomFavorites = useCallback((next: FavoriteFolder[]) => {
+    if (isTauriRuntime()) {
+      void invoke("save_custom_favorites", { favorites: next });
+    } else {
+      try {
+        window.localStorage.setItem(LOCAL_FAVORITES_STORAGE_KEY, JSON.stringify(next));
+      } catch {
+        // Ignore storage errors in browser preview
+      }
+    }
+  }, []);
+
+  const handleAddFavorites = useCallback(
+    (incoming: FavoriteFolder[]) => {
+      if (incoming.length === 0) return;
+      const locs = locationsRef.current;
+      const current = customFavoritesRef.current;
+      const builtInCount = countBuiltInFavorites(locs);
+      const remainingSlots = MAX_FAVORITES_ITEMS - (builtInCount + current.length);
+      if (remainingSlots <= 0) return;
+
+      const toAdd: FavoriteFolder[] = [];
+      const seenNew = new Set<string>();
+      for (const item of incoming) {
+        if (toAdd.length >= remainingSlots) break;
+        const trimmedPath = item.path.trim();
+        if (!trimmedPath || trimmedPath.startsWith("virtual://")) continue;
+        const key = normalizePathKey(trimmedPath);
+        if (seenNew.has(key)) continue;
+        if (isPathInFavorites(trimmedPath, locs, current)) continue;
+        seenNew.add(key);
+        const name = item.name.trim() || labelForPendingPath(trimmedPath, locs);
+        toAdd.push({ name, path: trimmedPath });
+      }
+
+      if (toAdd.length === 0) return;
+      const next = [...current, ...toAdd];
+      customFavoritesRef.current = next;
+      setCustomFavorites(next);
+      persistCustomFavorites(next);
+    },
+    [persistCustomFavorites]
+  );
+
+  const handleRemoveFavorite = useCallback(
+    (targetPath: string) => {
+      const targetKey = normalizePathKey(targetPath);
+      const next = customFavoritesRef.current.filter(
+        (fav) => normalizePathKey(fav.path) !== targetKey
+      );
+      if (next.length === customFavoritesRef.current.length) return;
+      customFavoritesRef.current = next;
+      setCustomFavorites(next);
+      persistCustomFavorites(next);
+
+      if (
+        activePanelRef.current.startsWith("fav:") &&
+        normalizePathKey(activePanelRef.current.slice(4)) === targetKey
+      ) {
+        activePanelRef.current = "home";
+        setActivePanel("home");
+      }
+    },
+    [persistCustomFavorites]
+  );
 
   const updateTrackedPanelState = useCallback(
     (
@@ -345,6 +454,23 @@ export const App: React.FC = () => {
         panelStatesRef.current = persisted.panels;
       }
 
+      const rawFavorites = isTauriRuntime()
+        ? (persisted?.customFavorites ?? [])
+        : loadBrowserCustomFavorites();
+      const maxCustom = Math.max(0, MAX_FAVORITES_ITEMS - countBuiltInFavorites(resolvedLocations));
+      const initialFavorites: FavoriteFolder[] = [];
+      for (const fav of rawFavorites) {
+        if (initialFavorites.length >= maxCustom) break;
+        if (!fav.path || fav.path.startsWith("virtual://")) continue;
+        if (isPathInFavorites(fav.path, resolvedLocations, initialFavorites)) continue;
+        initialFavorites.push({
+          name: fav.name.trim() || labelForPendingPath(fav.path, resolvedLocations),
+          path: fav.path.trim(),
+        });
+      }
+      customFavoritesRef.current = initialFavorites;
+      setCustomFavorites(initialFavorites);
+
       let initialPanel: TrackedPanelId =
         persisted?.activePanel && isTrackedPanel(persisted.activePanel)
           ? persisted.activePanel
@@ -394,6 +520,71 @@ export const App: React.FC = () => {
     };
   }, [fetchDirectory, resolvePanelTarget, updateTrackedPanelState]);
 
+  // Native OS drag-and-drop into the Favorites section (Tauri Webview)
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let unlisten: (() => void) | null = null;
+    let cancelled = false;
+
+    const isPointInFavorites = (pos: { x: number; y: number }): boolean => {
+      const el = favoritesSectionRef.current;
+      if (!el) return false;
+      const rect = el.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      const cssX = pos.x / dpr;
+      const cssY = pos.y / dpr;
+      return (
+        cssX >= rect.left &&
+        cssX <= rect.right &&
+        cssY >= rect.top &&
+        cssY <= rect.bottom
+      );
+    };
+
+    void getCurrentWebview()
+      .onDragDropEvent((event) => {
+        if (cancelled) return;
+        const payload = event.payload;
+        if (payload.type === "enter" || payload.type === "over") {
+          setOsDragOverFavorites(isPointInFavorites(payload.position));
+        } else if (payload.type === "leave") {
+          setOsDragOverFavorites(false);
+        } else if (payload.type === "drop") {
+          const inside = isPointInFavorites(payload.position);
+          setOsDragOverFavorites(false);
+          if (inside && payload.paths.length > 0) {
+            void (async () => {
+              try {
+                const validDirs = await invoke<FavoriteFolder[]>("validate_favorite_dirs", {
+                  paths: payload.paths,
+                });
+                if (validDirs.length > 0) {
+                  handleAddFavorites(validDirs);
+                }
+              } catch {
+                // Ignore invalid drop payload
+              }
+            })();
+          }
+        }
+      })
+      .then((fn) => {
+        if (cancelled) {
+          fn();
+        } else {
+          unlisten = fn;
+        }
+      })
+      .catch(() => {
+        // Ignore if drag-drop listener is unavailable
+      });
+
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  }, [handleAddFavorites]);
+
   const activePath = pendingPath ?? listing?.currentPath ?? "";
 
   const navigateTo = useCallback(
@@ -426,6 +617,31 @@ export const App: React.FC = () => {
     async (panel: PanelId) => {
       const rootPath = getRootPathForPanel(panel, locations);
       if (rootPath === null) return;
+
+      if (panel.startsWith("fav:")) {
+        if (isTauriRuntime()) {
+          try {
+            const exists = await invoke<boolean>("check_directory_exists", {
+              path: rootPath,
+            });
+            if (!exists) {
+              const targetKey = normalizePathKey(rootPath);
+              const matched = customFavoritesRef.current.find(
+                (f) => normalizePathKey(f.path) === targetKey
+              );
+              setMissingFavorite(
+                matched ?? {
+                  name: labelForPendingPath(rootPath, locations),
+                  path: rootPath,
+                }
+              );
+              return;
+            }
+          } catch {
+            // Fall through to normal fetch if check fails unexpectedly
+          }
+        }
+      }
 
       const wasSamePanel = activePanelRef.current === panel;
       activePanelRef.current = panel;
@@ -801,9 +1017,20 @@ export const App: React.FC = () => {
     }
   }, []);
 
-  // Keyboard support: Backspace or Alt+Left goes back
+  // Keyboard support: Backspace or Alt+Left goes back; dialog Escape/Enter handling
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      if (missingFavorite) {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          setMissingFavorite(null);
+        } else if (e.key === "Enter") {
+          e.preventDefault();
+          handleRemoveFavorite(missingFavorite.path);
+          setMissingFavorite(null);
+        }
+        return;
+      }
       if ((e.altKey && e.key === "ArrowLeft") || (e.key === "Backspace" && !e.ctrlKey && !e.metaKey)) {
         e.preventDefault();
         void handleBack();
@@ -814,7 +1041,7 @@ export const App: React.FC = () => {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [handleBack, handleForward]);
+  }, [handleBack, handleForward, handleRemoveFavorite, missingFavorite]);
 
   const isPendingNavigation = loading && pendingPath !== null;
   const displayTitle = isPendingNavigation
@@ -830,9 +1057,15 @@ export const App: React.FC = () => {
       <Sidebar
         locations={locations}
         activePanel={activePanel}
+        customFavorites={customFavorites}
+        draggingFolder={draggingFolder}
+        osDragOverFavorites={osDragOverFavorites}
+        favoritesSectionRef={favoritesSectionRef}
         width={sidebarWidth}
         onResizeWidth={setSidebarWidth}
         onSelectPanel={(panel) => void handleSelectPanel(panel)}
+        onAddFavorites={handleAddFavorites}
+        onRemoveFavorite={handleRemoveFavorite}
         onWindowClose={handleWindowClose}
         onWindowMinimize={handleWindowMinimize}
         onWindowMaximize={handleWindowMaximize}
@@ -889,8 +1122,58 @@ export const App: React.FC = () => {
           onChangeSort={handleChangeSort}
           onExpandedPathsChange={handleExpandedPathsChange}
           onColumnPathsChange={handleColumnPathsChange}
+          onDragFolderChange={setDraggingFolder}
         />
       </div>
+
+      {missingFavorite && (
+        <div
+          className="finder-dialog-backdrop"
+          role="presentation"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) {
+              setMissingFavorite(null);
+            }
+          }}
+        >
+          <div
+            className="finder-dialog"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="missing-fav-title"
+            aria-describedby="missing-fav-desc"
+          >
+            <div className="finder-dialog-icon" aria-hidden="true">
+              <AlertTriangle size={28} strokeWidth={1.8} />
+            </div>
+            <h2 id="missing-fav-title" className="finder-dialog-title">
+              &ldquo;{missingFavorite.name}&rdquo; can&apos;t be opened because the original folder can&apos;t be found.
+            </h2>
+            <p id="missing-fav-desc" className="finder-dialog-message">
+              The directory <span className="finder-dialog-path">{missingFavorite.path}</span> no longer exists. Would you like to remove it from Favorites?
+            </p>
+            <div className="finder-dialog-actions">
+              <button
+                type="button"
+                className="finder-dialog-btn"
+                onClick={() => setMissingFavorite(null)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="finder-dialog-btn finder-dialog-btn-primary"
+                onClick={() => {
+                  handleRemoveFavorite(missingFavorite.path);
+                  setMissingFavorite(null);
+                }}
+              >
+                Remove
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

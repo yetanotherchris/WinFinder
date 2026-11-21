@@ -14,11 +14,13 @@ import {
 import type {
   BreadcrumbItem,
   DirectoryListing,
+  FavoriteFolder,
   FileEntry,
   SortConfig,
   SortField,
   ViewMode,
 } from "../types";
+import { FAVORITE_DRAG_MIME } from "../utils/favorites";
 import {
   formatDateModified,
   formatFileSize,
@@ -56,6 +58,7 @@ interface MainViewProps {
   onChangeSort: (next: SortConfig) => void;
   onExpandedPathsChange: (paths: string[]) => void;
   onColumnPathsChange: (paths: string[]) => void;
+  onDragFolderChange?: (folder: FavoriteFolder | null) => void;
 }
 
 interface MillerColumn {
@@ -120,7 +123,25 @@ export const MainView: React.FC<MainViewProps> = ({
   onChangeSort,
   onExpandedPathsChange,
   onColumnPathsChange,
+  onDragFolderChange,
 }) => {
+  const getFolderDragProps = (entry: FileEntry) => {
+    const canDrag = entry.isDir && !entry.path.startsWith("virtual://");
+    if (!canDrag) return {};
+    return {
+      draggable: true,
+      onDragStart: (e: React.DragEvent) => {
+        const payload: FavoriteFolder = { name: entry.name, path: entry.path };
+        e.dataTransfer.effectAllowed = "link";
+        e.dataTransfer.setData(FAVORITE_DRAG_MIME, JSON.stringify(payload));
+        e.dataTransfer.setData("text/plain", entry.path);
+        onDragFolderChange?.(payload);
+      },
+      onDragEnd: () => {
+        onDragFolderChange?.(null);
+      },
+    };
+  };
   const sortedEntries = useMemo(
     () => sortEntries(entries, sortConfig),
     [entries, sortConfig]
@@ -916,6 +937,7 @@ export const MainView: React.FC<MainViewProps> = ({
                     tabIndex={0}
                     style={listGridStyle}
                     className={`list-row ${idx % 2 === 1 ? "alt" : ""} ${isSelected ? "selected" : ""}`}
+                    {...getFolderDragProps(entry)}
                     onClick={(e) => {
                       e.stopPropagation();
                       onSelect(entry);
@@ -1017,6 +1039,7 @@ export const MainView: React.FC<MainViewProps> = ({
                           key={entry.path}
                           type="button"
                           className={`miller-row ${isSelected ? "selected" : ""} ${isTrail && !isSelected ? "trail" : ""}`}
+                          {...getFolderDragProps(entry)}
                           onClick={() => void handleColumnSelect(colIdx, entry)}
                           onContextMenu={(e) => {
                             e.preventDefault();
@@ -1120,6 +1143,7 @@ export const MainView: React.FC<MainViewProps> = ({
             {galleryActiveItem && (
               <div
                 className="gallery-hero"
+                {...getFolderDragProps(galleryActiveItem)}
                 onContextMenu={(e) => {
                   e.preventDefault();
                   e.stopPropagation();
@@ -1173,6 +1197,7 @@ export const MainView: React.FC<MainViewProps> = ({
                   role="option"
                   aria-selected={isSelected}
                   className={`gallery-thumb ${isSelected ? "selected" : ""}`}
+                  {...getFolderDragProps(entry)}
                   onClick={() => onSelect(entry)}
                   onContextMenu={(e) => {
                     e.preventDefault();
@@ -1218,6 +1243,7 @@ export const MainView: React.FC<MainViewProps> = ({
               key={entry.path}
               type="button"
               className={`icon-tile ${isSelected ? "selected" : ""}`}
+              {...getFolderDragProps(entry)}
               onClick={(e) => {
                 e.stopPropagation();
                 onSelect(entry);
