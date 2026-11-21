@@ -1,6 +1,6 @@
 [package]
 name = "winfinder"
-version = "0.1.0"
+version = "0.0.1"
 description = "A macOS Finder-inspired cross-platform file manager"
 authors = ["WinFinder"]
 edition = "2021"
