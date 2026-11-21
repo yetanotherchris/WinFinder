@@ -11,6 +11,7 @@ import {
   Share,
   CircleEllipsis,
   Search,
+  X,
   Check,
   Copy,
   Link,
@@ -46,6 +47,13 @@ interface ToolbarProps {
   onCopyCurrentPath: () => void;
   onShowInExplorer: () => void;
   onRefresh: () => void;
+  searchOpen: boolean;
+  searchQuery: string;
+  searchInputRef: React.RefObject<HTMLInputElement | null>;
+  onOpenSearch: () => void;
+  onSearchQueryChange: (query: string) => void;
+  onSearchSubmit: () => void;
+  onCloseSearch: () => void;
 }
 
 const SORT_FIELDS: { field: SortField; label: string }[] = [
@@ -78,6 +86,13 @@ export const Toolbar: React.FC<ToolbarProps> = ({
   onCopyCurrentPath,
   onShowInExplorer,
   onRefresh,
+  searchOpen,
+  searchQuery,
+  searchInputRef,
+  onOpenSearch,
+  onSearchQueryChange,
+  onSearchSubmit,
+  onCloseSearch,
 }) => {
   const [sortMenuOpen, setSortMenuOpen] = useState(false);
   const [shareMenuOpen, setShareMenuOpen] = useState(false);
@@ -543,14 +558,60 @@ export const Toolbar: React.FC<ToolbarProps> = ({
         <div className="toolbar-spacer-sm" />
 
         {/* Search */}
-        <button
-          type="button"
-          className="toolbar-btn filler-btn"
-          title="Search (prototype filler)"
-          aria-label="Search"
-        >
-          <Search size={15} strokeWidth={1.85} />
-        </button>
+        {searchOpen ? (
+          <div className="toolbar-search-box" role="search">
+            <Search size={13} strokeWidth={2} className="toolbar-search-icon" aria-hidden="true" />
+            <input
+              ref={searchInputRef}
+              type="text"
+              className="toolbar-search-input"
+              value={searchQuery}
+              placeholder="Search"
+              aria-label="Search files and folders"
+              onChange={(e) => onSearchQueryChange(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  onCloseSearch();
+                } else if (e.key === "Enter") {
+                  e.preventDefault();
+                  onSearchSubmit();
+                }
+              }}
+              onBlur={() => {
+                if (!searchQuery.trim()) {
+                  onCloseSearch();
+                }
+              }}
+            />
+            <button
+              type="button"
+              className="toolbar-search-clear"
+              title="Clear search"
+              aria-label="Clear search"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={onCloseSearch}
+            >
+              <X size={11} strokeWidth={2.4} />
+            </button>
+          </div>
+        ) : (
+          <button
+            type="button"
+            className="toolbar-btn"
+            onClick={() => {
+              setSortMenuOpen(false);
+              setShareMenuOpen(false);
+              setActionsMenuOpen(false);
+              onOpenSearch();
+            }}
+            title="Search (Ctrl+F)"
+            aria-label="Search"
+          >
+            <Search size={15} strokeWidth={1.85} />
+          </button>
+        )}
       </div>
     </header>
   );
