@@ -20,5 +20,17 @@
         ]
       ]
     }
-  }
+  },
+  "post_uninstall": [
+    "if ($cmd -eq 'uninstall') {",
+    "    $configDir = Join-Path $env:USERPROFILE '.winfinder'",
+    "    $configFile = Join-Path $configDir 'config.json'",
+    "    if (Test-Path -LiteralPath $configFile) {",
+    "        Remove-Item -LiteralPath $configFile -Force -ErrorAction SilentlyContinue",
+    "    }",
+    "    if ((Test-Path -LiteralPath $configDir -PathType Container) -and -not (Get-ChildItem -LiteralPath $configDir -Force -ErrorAction SilentlyContinue)) {",
+    "        Remove-Item -LiteralPath $configDir -Force -ErrorAction SilentlyContinue",
+    "    }",
+    "}"
+  ]
 }
