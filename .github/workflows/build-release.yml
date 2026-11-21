@@ -1,0 +1,202 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Assert tag matches strict semver
+        shell: bash
+        run: |
+          if ! [[ "${{ github.ref_name }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Tag ${{ github.ref_name }} does not match vMAJOR.MINOR.PATCH (v[0-9]+.[0-9]+.[0-9]+)."
+            exit 1
+          fi
+
+      - name: Verify tag is reachable from main
+        shell: bash
+        run: |
+          git fetch origin main
+          if git merge-base --is-ancestor "${{ github.ref_name }}" refs/remotes/origin/main; then
+            echo "Tag ${{ github.ref_name }} is reachable from main"
+          else
+            echo "::error::Tag ${{ github.ref_name }} is not reachable from main; no release will be created."
+            exit 1
+          fi
+
+      - name: Check the tag has no existing release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "${{ github.ref_name }}" >/dev/null 2>&1; then
+            echo "::error::A release for tag ${{ github.ref_name }} already exists; refusing to overwrite it."
+            exit 1
+          fi
+          echo "No existing release for ${{ github.ref_name }}"
+
+  build:
+    needs: validate
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # actions/setup-node v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: 'src-tauri -> target'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Determine version
+        id: version
+        shell: bash
+        run: |
+          VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION#v}"
+          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Sync project version to tag
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.VERSION }}
+        run: ./updateversion.ps1 -Version "$env:RELEASE_VERSION"
+
+      - name: Build Tauri Windows app
+        run: npm run tauri build
+
+      - name: Package Windows x64 release artifacts
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.VERSION }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $artifactsDir = Join-Path $PWD "release-artifacts"
+          New-Item -ItemType Directory -Force -Path $artifactsDir | Out-Null
+
+          $exePath = Join-Path $PWD "src-tauri/target/release/winfinder.exe"
+          if (-not (Test-Path -LiteralPath $exePath)) {
+            throw "Built executable not found at $exePath"
+          }
+
+          $zipPath = Join-Path $artifactsDir "winfinder-$env:RELEASE_VERSION-windows-x64.zip"
+          Compress-Archive -Path $exePath -DestinationPath $zipPath -Force
+
+          foreach ($bundleGlob in @(
+            "src-tauri/target/release/bundle/nsis/*.exe",
+            "src-tauri/target/release/bundle/msi/*.msi"
+          )) {
+            Get-ChildItem -Path $bundleGlob -ErrorAction SilentlyContinue | ForEach-Object {
+              Copy-Item -LiteralPath $_.FullName -Destination $artifactsDir -Force
+            }
+          }
+
+          Get-ChildItem -Path $artifactsDir | Format-Table Name, Length
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # actions/upload-artifact v7.0.1
+        with:
+          name: artifacts-windows-x64
+          path: release-artifacts/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Determine version
+        id: version
+        shell: bash
+        run: |
+          VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION#v}"
+          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Download Windows artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # actions/download-artifact v8.0.2
+        with:
+          name: artifacts-windows-x64
+          path: artifacts
+
+      - name: Create draft GitHub Release
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # softprops/action-gh-release v3
+        with:
+          draft: true
+          files: artifacts/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+
+      - name: Checkout main
+        shell: bash
+        run: |
+          git fetch origin main
+          git checkout -B main origin/main
+          git pull --rebase origin main
+
+      - name: Update Scoop manifest
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.VERSION }}
+        run: ./updatescoop.ps1 -Version "$env:RELEASE_VERSION" -ArtifactsDir artifacts
+
+      - name: Sync version files to tag
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.VERSION }}
+        run: ./updateversion.ps1 -Version "$env:RELEASE_VERSION"
+
+      - name: Commit updated package definitions
+        uses: stefanzweifel/git-auto-commit-action@4a55954c782fc1ea30b9056cd3e7a2b40ca8887d # stefanzweifel/git-auto-commit-action v7
+        with:
+          commit_message: 'chore(release): update Scoop manifest and version to v${{ steps.version.outputs.VERSION }}'
+          branch: main
+          file_pattern: winfinder.json package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml
+          commit_user_name: github-actions[bot]
+          commit_user_email: 41898282+github-actions[bot]@users.noreply.github.com
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # softprops/action-gh-release v3
+        with:
+          tag_name: ${{ github.ref_name }}
+          draft: false
