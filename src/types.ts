@@ -97,6 +97,7 @@ export interface PanelState {
 
 export interface AppSettings {
   useWindowsWindowControls: boolean;
+  useEverythingCli?: boolean | null;
 }
 
 export interface PersistedAppState {

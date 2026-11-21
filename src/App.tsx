@@ -58,6 +58,7 @@ function parseBitlockerLockedDrive(err: unknown): string | null {
 
 const DEFAULT_SETTINGS: AppSettings = {
   useWindowsWindowControls: false,
+  useEverythingCli: null,
 };
 
 const DEFAULT_VIEW_MODE: ViewMode = "icons";
@@ -128,6 +129,10 @@ function loadBrowserSettings(): AppSettings {
     const parsed = JSON.parse(raw);
     return {
       useWindowsWindowControls: Boolean(parsed?.useWindowsWindowControls),
+      useEverythingCli:
+        typeof parsed?.useEverythingCli === "boolean"
+          ? parsed.useEverythingCli
+          : null,
     };
   } catch {
     return DEFAULT_SETTINGS;
@@ -905,6 +910,10 @@ export const App: React.FC = () => {
             useWindowsWindowControls: Boolean(
               persisted?.settings?.useWindowsWindowControls
             ),
+            useEverythingCli:
+              typeof persisted?.settings?.useEverythingCli === "boolean"
+                ? persisted.settings.useEverythingCli
+                : null,
           }
         : loadBrowserSettings();
       setSettings(initialSettings);
