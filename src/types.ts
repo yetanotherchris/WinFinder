@@ -86,3 +86,8 @@ export interface PersistedAppState {
   panels: Partial<Record<TrackedPanelId, PanelState>>;
   customFavorites?: FavoriteFolder[];
 }
+
+export interface ResolvedGoToPath {
+  directoryPath: string;
+  selectFilePath: string | null;
+}
