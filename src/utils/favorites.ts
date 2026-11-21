@@ -51,3 +51,20 @@ export function isPathInFavorites(
   }
   return customFavorites.some((fav) => normalizePathKey(fav.path) === key);
 }
+
+export function isPathWithinRoot(targetPath: string, rootPath: string): boolean {
+  if (!targetPath || !rootPath) return false;
+  if (rootPath.startsWith("virtual://")) {
+    return targetPath === rootPath;
+  }
+  if (targetPath.startsWith("virtual://")) {
+    return false;
+  }
+  const normTarget = normalizePathKey(targetPath).replace(/\\/g, "/");
+  const normRoot = normalizePathKey(rootPath).replace(/\\/g, "/");
+  if (normTarget === normRoot) return true;
+  if (normRoot.endsWith("/")) {
+    return normTarget.startsWith(normRoot);
+  }
+  return normTarget.startsWith(`${normRoot}/`);
+}

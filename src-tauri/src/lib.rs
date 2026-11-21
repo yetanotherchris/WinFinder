@@ -12,8 +12,41 @@ use tauri::Manager;
 const TRACKED_PANELS: &[&str] = &["recents", "desktop", "documents", "downloads", "home"];
 const MAX_FAVORITES: usize = 10;
 
+fn is_custom_favorite_panel(panel_id: &str) -> bool {
+    panel_id
+        .strip_prefix("fav:")
+        .map(|p| {
+            let trimmed = p.trim();
+            !trimmed.is_empty() && !trimmed.starts_with("virtual://")
+        })
+        .unwrap_or(false)
+}
+
 fn is_tracked_panel(panel_id: &str) -> bool {
-    TRACKED_PANELS.contains(&panel_id)
+    TRACKED_PANELS.contains(&panel_id) || is_custom_favorite_panel(panel_id)
+}
+
+fn is_path_within_root(target: &str, root: &str) -> bool {
+    let target_trimmed = target.trim();
+    let root_trimmed = root.trim();
+    if target_trimmed.is_empty() || root_trimmed.is_empty() {
+        return false;
+    }
+    if root_trimmed.starts_with("virtual://") {
+        return target_trimmed == root_trimmed;
+    }
+    if target_trimmed.starts_with("virtual://") {
+        return false;
+    }
+    let norm_target = normalize_path_key(target_trimmed).replace('\\', "/");
+    let norm_root = normalize_path_key(root_trimmed).replace('\\', "/");
+    if norm_target == norm_root {
+        return true;
+    }
+    if norm_root.ends_with('/') {
+        return norm_target.starts_with(&norm_root);
+    }
+    norm_target.starts_with(&format!("{}/", norm_root))
 }
 
 fn normalize_path_key(raw: &str) -> String {
@@ -137,11 +170,73 @@ impl Default for PersistedAppState {
 
 impl PersistedAppState {
     fn sanitize(&mut self) {
-        if !is_tracked_panel(&self.active_panel) {
+        // 1. Clean custom_favorites first so we know which fav:<path> panel keys are valid
+        let mut seen = std::collections::HashSet::new();
+        let mut fav_panel_by_key: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        let mut cleaned = Vec::new();
+        for fav in std::mem::take(&mut self.custom_favorites) {
+            let trimmed_path = fav.path.trim().to_string();
+            if trimmed_path.is_empty() || trimmed_path.starts_with("virtual://") {
+                continue;
+            }
+            let key = normalize_path_key(&trimmed_path);
+            if !seen.insert(key.clone()) {
+                continue;
+            }
+            let name = if fav.name.trim().is_empty() {
+                display_name_for_path(Path::new(&trimmed_path))
+            } else {
+                fav.name.trim().to_string()
+            };
+            fav_panel_by_key.insert(key, format!("fav:{}", trimmed_path));
+            cleaned.push(FavoriteFolder {
+                name,
+                path: trimmed_path,
+            });
+            if cleaned.len() >= MAX_FAVORITES {
+                break;
+            }
+        }
+        self.custom_favorites = cleaned;
+
+        // 2. Validate & canonicalize active_panel
+        if let Some(fav_path) = self.active_panel.strip_prefix("fav:") {
+            let key = normalize_path_key(fav_path);
+            if let Some(canonical_panel) = fav_panel_by_key.get(&key) {
+                self.active_panel = canonical_panel.clone();
+            } else {
+                self.active_panel = "home".to_string();
+            }
+        } else if !TRACKED_PANELS.contains(&self.active_panel.as_str()) {
             self.active_panel = "home".to_string();
         }
-        self.panels.retain(|k, _| is_tracked_panel(k));
-        for panel in self.panels.values_mut() {
+
+        // 3. Retain & canonicalize tracked panels (built-in + existing custom favorites)
+        let mut sanitized_panels = BTreeMap::new();
+        for (panel_key, mut panel) in std::mem::take(&mut self.panels) {
+            let canonical_key = if let Some(fav_path) = panel_key.strip_prefix("fav:") {
+                let key = normalize_path_key(fav_path);
+                match fav_panel_by_key.get(&key) {
+                    Some(canonical) => {
+                        let root_path = &canonical[4..];
+                        if let Some(last_path) = panel.last_path.as_deref() {
+                            if !is_path_within_root(last_path, root_path) {
+                                panel.last_path = Some(root_path.to_string());
+                                panel.expanded_paths.clear();
+                                panel.column_paths.clear();
+                            }
+                        }
+                        canonical.clone()
+                    }
+                    None => continue,
+                }
+            } else if TRACKED_PANELS.contains(&panel_key.as_str()) {
+                panel_key
+            } else {
+                continue;
+            };
+
             if !matches!(
                 panel.view_mode.as_str(),
                 "icons" | "list" | "columns" | "gallery"
@@ -157,33 +252,10 @@ impl PersistedAppState {
             if !matches!(panel.sort.direction.as_str(), "asc" | "desc") {
                 panel.sort.direction = "asc".to_string();
             }
-        }
 
-        let mut seen = std::collections::HashSet::new();
-        let mut cleaned = Vec::new();
-        for fav in std::mem::take(&mut self.custom_favorites) {
-            let trimmed_path = fav.path.trim().to_string();
-            if trimmed_path.is_empty() || trimmed_path.starts_with("virtual://") {
-                continue;
-            }
-            let key = normalize_path_key(&trimmed_path);
-            if !seen.insert(key) {
-                continue;
-            }
-            let name = if fav.name.trim().is_empty() {
-                display_name_for_path(Path::new(&trimmed_path))
-            } else {
-                fav.name.trim().to_string()
-            };
-            cleaned.push(FavoriteFolder {
-                name,
-                path: trimmed_path,
-            });
-            if cleaned.len() >= MAX_FAVORITES {
-                break;
-            }
+            sanitized_panels.insert(canonical_key, panel);
         }
-        self.custom_favorites = cleaned;
+        self.panels = sanitized_panels;
     }
 }
 
@@ -387,11 +459,18 @@ fn resolve_existing_dir(saved_path: Option<&str>, root_path: &str) -> String {
 
     if let Some(raw) = saved_path {
         let trimmed = raw.trim();
-        if !trimmed.is_empty() && !trimmed.starts_with("virtual://") {
+        if !trimmed.is_empty()
+            && !trimmed.starts_with("virtual://")
+            && is_path_within_root(trimmed, root_path)
+        {
             let mut candidate = PathBuf::from(trimmed);
             loop {
+                let candidate_str = candidate.to_string_lossy().into_owned();
+                if !is_path_within_root(&candidate_str, root_path) {
+                    break;
+                }
                 if candidate.is_dir() {
-                    return candidate.to_string_lossy().into_owned();
+                    return candidate_str;
                 }
                 match candidate.parent() {
                     Some(parent) if parent != candidate.as_path() => {
@@ -1573,6 +1652,283 @@ fn get_sidebar_locations() -> Result<SidebarLocations, String> {
     })
 }
 
+const MAX_SEARCH_RESULTS: usize = 200;
+const MAX_SEARCH_WALK_DIRS: usize = 4000;
+const MAX_SEARCH_WALK_DURATION: Duration = Duration::from_secs(4);
+
+fn file_entry_from_metadata(entry_path: &Path, name: String, metadata: &fs::Metadata) -> FileEntry {
+    let is_dir = metadata.is_dir();
+    let extension = if is_dir {
+        None
+    } else {
+        entry_path
+            .extension()
+            .map(|e| e.to_string_lossy().to_lowercase())
+    };
+    let modified_ms = metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64);
+
+    FileEntry {
+        name,
+        path: entry_path.to_string_lossy().into_owned(),
+        is_dir,
+        entry_kind: if is_dir {
+            "folder".to_string()
+        } else {
+            "file".to_string()
+        },
+        extension,
+        size: if is_dir { 0 } else { metadata.len() },
+        modified_ms,
+        icon_data_url: None,
+    }
+}
+
+fn resolve_search_scope(scope_path: Option<&str>) -> Result<PathBuf, String> {
+    if let Some(raw) = scope_path {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() && !trimmed.starts_with("virtual://") {
+            let candidate = PathBuf::from(trimmed);
+            if candidate.is_dir() {
+                return Ok(candidate);
+            }
+        }
+    }
+    let (home, _, _) = home_info()?;
+    Ok(home)
+}
+
+#[cfg(target_os = "windows")]
+fn escape_windows_search_sql_literal(value: &str) -> String {
+    value.replace('\'', "''")
+}
+
+#[cfg(target_os = "windows")]
+fn build_windows_search_sql(scope: &Path, query: &str) -> String {
+    let mut scope_slash = scope.to_string_lossy().replace('\\', "/");
+    while scope_slash.len() > 3 && scope_slash.ends_with('/') {
+        scope_slash.pop();
+    }
+    format!(
+        "SELECT TOP {} System.ItemPathDisplay FROM SystemIndex WHERE SCOPE='file:{}' AND System.FileName LIKE '%{}%'",
+        MAX_SEARCH_RESULTS,
+        escape_windows_search_sql_literal(&scope_slash),
+        escape_windows_search_sql_literal(query)
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn query_windows_search_index(
+    scope: &Path,
+    query: &str,
+    show_hidden: bool,
+) -> Result<Vec<FileEntry>, String> {
+    use std::collections::HashSet;
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    let sql = build_windows_search_sql(scope, query);
+    let ps_script = r#"
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$sql = $env:WINFINDER_SEARCH_SQL
+$conn = New-Object System.Data.OleDb.OleDbConnection("Provider=Search.CollatorDSO;Extended Properties='Application=Windows';")
+try {
+  $conn.Open()
+  $cmd = $conn.CreateCommand()
+  $cmd.CommandTimeout = 4
+  $cmd.CommandText = $sql
+  $reader = $cmd.ExecuteReader()
+  while ($reader.Read()) {
+    $p = $reader.GetValue(0)
+    if ($p -and $p -is [string] -and $p.Length -gt 0) {
+      [Console]::Out.WriteLine($p)
+    }
+  }
+  $reader.Close()
+} finally {
+  if ($conn.State -ne 'Closed') { $conn.Close() }
+}
+"#;
+
+    let output = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            ps_script,
+        ])
+        .env("WINFINDER_SEARCH_SQL", sql)
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|e| format!("Failed to query Windows Search: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("Windows Search query failed: {}", stderr.trim()));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut seen = HashSet::new();
+    let mut entries = Vec::new();
+
+    for line in stdout.lines() {
+        let raw_path = line.trim();
+        if raw_path.is_empty() {
+            continue;
+        }
+        let key = normalize_path_key(raw_path);
+        if !seen.insert(key) {
+            continue;
+        }
+        let entry_path = Path::new(raw_path);
+        let Ok(metadata) = fs::metadata(entry_path) else {
+            continue;
+        };
+        let name = display_name_for_path(entry_path);
+        if !show_hidden && is_hidden_entry(&name, &metadata) {
+            continue;
+        }
+        entries.push(file_entry_from_metadata(entry_path, name, &metadata));
+        if entries.len() >= MAX_SEARCH_RESULTS {
+            break;
+        }
+    }
+
+    entries.sort_by(|a, b| {
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+
+    Ok(entries)
+}
+
+fn walk_search_directory(scope: &Path, query: &str, show_hidden: bool) -> Vec<FileEntry> {
+    use std::collections::VecDeque;
+    use std::time::Instant;
+
+    let query_lower = query.to_lowercase();
+    let started = Instant::now();
+    let mut queue = VecDeque::new();
+    queue.push_back(scope.to_path_buf());
+
+    let mut entries = Vec::new();
+    let mut visited_dirs = 0usize;
+
+    while let Some(dir) = queue.pop_front() {
+        if entries.len() >= MAX_SEARCH_RESULTS
+            || visited_dirs >= MAX_SEARCH_WALK_DIRS
+            || started.elapsed() >= MAX_SEARCH_WALK_DURATION
+        {
+            break;
+        }
+        visited_dirs += 1;
+
+        let Ok(read_dir) = fs::read_dir(&dir) else {
+            continue;
+        };
+
+        for item in read_dir.flatten() {
+            let entry_path = item.path();
+            let name = item.file_name().to_string_lossy().into_owned();
+            let Ok(metadata) = fs::symlink_metadata(&entry_path) else {
+                continue;
+            };
+            if !show_hidden && is_hidden_entry(&name, &metadata) {
+                continue;
+            }
+
+            let is_symlink = metadata.file_type().is_symlink();
+            if name.to_lowercase().contains(&query_lower) {
+                let effective_meta = if is_symlink {
+                    fs::metadata(&entry_path).unwrap_or(metadata)
+                } else {
+                    metadata
+                };
+                entries.push(file_entry_from_metadata(&entry_path, name, &effective_meta));
+                if entries.len() >= MAX_SEARCH_RESULTS {
+                    break;
+                }
+                if effective_meta.is_dir() && !is_symlink {
+                    queue.push_back(entry_path);
+                }
+            } else if metadata.is_dir() && !is_symlink {
+                queue.push_back(entry_path);
+            }
+        }
+    }
+
+    entries.sort_by(|a, b| {
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+
+    entries
+}
+
+fn perform_search(
+    query: &str,
+    scope_path: Option<&str>,
+    show_hidden: bool,
+) -> Result<DirectoryListing, String> {
+    let trimmed = query.trim();
+    let (_home, home_path, home_name) = home_info()?;
+    let scope = resolve_search_scope(scope_path)?;
+    let breadcrumbs = build_breadcrumbs(&scope);
+
+    if trimmed.is_empty() {
+        return Ok(DirectoryListing {
+            current_path: format!("virtual://search?q="),
+            current_name: "Search".to_string(),
+            home_path,
+            home_name,
+            breadcrumbs,
+            entries: Vec::new(),
+            empty_message: Some("Type to search files and folders".to_string()),
+        });
+    }
+
+    #[cfg(target_os = "windows")]
+    let entries = match query_windows_search_index(&scope, trimmed, show_hidden) {
+        Ok(found) if !found.is_empty() => found,
+        _ => walk_search_directory(&scope, trimmed, show_hidden),
+    };
+
+    #[cfg(not(target_os = "windows"))]
+    let entries = walk_search_directory(&scope, trimmed, show_hidden);
+
+    Ok(DirectoryListing {
+        current_path: format!("virtual://search?q={}", trimmed),
+        current_name: format!("Search: \"{}\"", trimmed),
+        home_path,
+        home_name,
+        breadcrumbs,
+        entries,
+        empty_message: Some(format!("No items matching \"{}\"", trimmed)),
+    })
+}
+
+#[tauri::command]
+async fn search_directory(
+    query: String,
+    scope_path: Option<String>,
+    show_hidden: Option<bool>,
+) -> Result<DirectoryListing, String> {
+    let include_hidden = show_hidden.unwrap_or(false);
+    tauri::async_runtime::spawn_blocking(move || {
+        perform_search(&query, scope_path.as_deref(), include_hidden)
+    })
+    .await
+    .map_err(|e| format!("Search failed: {}", e))?
+}
+
 #[tauri::command]
 async fn list_directory(
     path: Option<String>,
@@ -2250,6 +2606,7 @@ pub fn run() {
             get_sidebar_locations,
             get_initial_path,
             list_directory,
+            search_directory,
             open_item,
             show_context_menu,
             copy_file_to_clipboard,
@@ -2365,6 +2722,158 @@ mod tests {
                 ("Documents", "/Users/chris/Documents"),
             ]
         );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_search_sql_escapes_quotes_and_normalizes_scope() {
+        let sql = build_windows_search_sql(Path::new(r"C:\Users\O'Brien\Docs\"), "john's");
+        assert!(sql.contains("SCOPE='file:C:/Users/O''Brien/Docs'"));
+        assert!(sql.contains("System.FileName LIKE '%john''s%'"));
+    }
+
+    #[test]
+    fn walk_search_directory_finds_nested_matches_and_respects_hidden() {
+        let unique = format!(
+            "winfinder-search-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let root = std::env::temp_dir().join(unique);
+        let sub = root.join("SubFolder");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(root.join("AlphaReport.txt"), "hello").unwrap();
+        fs::write(sub.join("beta_report.md"), "world").unwrap();
+        fs::write(sub.join(".hidden_report.txt"), "secret").unwrap();
+
+        let visible = walk_search_directory(&root, "report", false);
+        let visible_names: Vec<&str> = visible.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(visible_names, vec!["AlphaReport.txt", "beta_report.md"]);
+
+        let with_hidden = walk_search_directory(&root, "report", true);
+        let hidden_names: Vec<&str> = with_hidden.iter().map(|e| e.name.as_str()).collect();
+        assert!(hidden_names.contains(&".hidden_report.txt"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn path_within_root_checks_segment_boundaries() {
+        #[cfg(target_os = "windows")]
+        {
+            assert!(is_path_within_root(
+                r"C:\Users\chris\Projects",
+                r"C:\Users\chris\Projects"
+            ));
+            assert!(is_path_within_root(
+                r"C:\Users\chris\Projects\WinFinder",
+                r"C:\Users\chris\Projects"
+            ));
+            assert!(is_path_within_root(
+                r"c:\users\chris\projects\winfinder",
+                r"C:\Users\chris\Projects"
+            ));
+            assert!(!is_path_within_root(
+                r"C:\Users\chris\Projects2",
+                r"C:\Users\chris\Projects"
+            ));
+            assert!(!is_path_within_root(r"C:\", r"C:\Users\chris\Projects"));
+            assert!(is_path_within_root(r"C:\Users", r"C:\"));
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            assert!(is_path_within_root("/Users/chris/Projects", "/Users/chris/Projects"));
+            assert!(is_path_within_root("/Users/chris/Projects/WinFinder", "/Users/chris/Projects"));
+            assert!(!is_path_within_root("/Users/chris/Projects2", "/Users/chris/Projects"));
+            assert!(!is_path_within_root("/", "/Users/chris/Projects"));
+            assert!(is_path_within_root("/Users", "/"));
+        }
+    }
+
+    #[test]
+    fn sanitize_keeps_valid_custom_favorite_state_and_prunes_removed() {
+        let fav_root = if cfg!(target_os = "windows") {
+            r"C:\Users\chris\Projects"
+        } else {
+            "/Users/chris/Projects"
+        };
+        let fav_sub = if cfg!(target_os = "windows") {
+            r"C:\Users\chris\Projects\WinFinder"
+        } else {
+            "/Users/chris/Projects/WinFinder"
+        };
+        let outside = if cfg!(target_os = "windows") {
+            r"C:\"
+        } else {
+            "/"
+        };
+        let removed_root = if cfg!(target_os = "windows") {
+            r"C:\Users\chris\OldFav"
+        } else {
+            "/Users/chris/OldFav"
+        };
+
+        let fav_panel = format!("fav:{}", fav_root);
+        let removed_panel = format!("fav:{}", removed_root);
+
+        let mut panels = BTreeMap::new();
+        panels.insert(
+            fav_panel.clone(),
+            PanelState {
+                view_mode: "list".to_string(),
+                sort: PersistedSortConfig::default(),
+                last_path: Some(fav_sub.to_string()),
+                expanded_paths: vec![fav_sub.to_string()],
+                column_paths: vec![],
+            },
+        );
+        panels.insert(
+            removed_panel.clone(),
+            PanelState {
+                view_mode: "columns".to_string(),
+                sort: PersistedSortConfig::default(),
+                last_path: Some(removed_root.to_string()),
+                expanded_paths: vec![],
+                column_paths: vec![],
+            },
+        );
+
+        let mut state = PersistedAppState {
+            window: None,
+            active_panel: fav_panel.clone(),
+            panels,
+            custom_favorites: vec![FavoriteFolder {
+                name: "Projects".to_string(),
+                path: fav_root.to_string(),
+            }],
+        };
+
+        state.sanitize();
+        assert_eq!(state.active_panel, fav_panel);
+        assert!(state.panels.contains_key(&fav_panel));
+        assert!(!state.panels.contains_key(&removed_panel));
+        assert_eq!(
+            state.panels.get(&fav_panel).unwrap().last_path.as_deref(),
+            Some(fav_sub)
+        );
+
+        // Outside last_path resets to favorite root
+        state.panels.get_mut(&fav_panel).unwrap().last_path = Some(outside.to_string());
+        state.sanitize();
+        assert_eq!(
+            state.panels.get(&fav_panel).unwrap().last_path.as_deref(),
+            Some(fav_root)
+        );
+        assert!(state.panels.get(&fav_panel).unwrap().expanded_paths.is_empty());
+
+        // Removing the favorite prunes its panel state and resets active_panel to home
+        state.custom_favorites.clear();
+        state.sanitize();
+        assert_eq!(state.active_panel, "home");
+        assert!(!state.panels.contains_key(&fav_panel));
     }
 
     #[test]

@@ -18,6 +18,7 @@ import {
 import {
   countBuiltInFavorites,
   isPathInFavorites,
+  isPathWithinRoot,
   MAX_FAVORITES_ITEMS,
   normalizePathKey,
   type FavoriteDropState,
@@ -28,6 +29,7 @@ import {
 } from "./utils/pathChain";
 import type {
   AppSettings,
+  CustomFavoritePanelId,
   DirectoryListing,
   FavoriteFolder,
   FileEntry,
@@ -60,8 +62,16 @@ const TRACKED_PANEL_SET = new Set<PanelId>([
   "home",
 ]);
 
+function isCustomFavoritePanel(panel: PanelId): panel is CustomFavoritePanelId {
+  return (
+    panel.startsWith("fav:") &&
+    panel.slice(4).trim().length > 0 &&
+    !panel.slice(4).trim().startsWith("virtual://")
+  );
+}
+
 function isTrackedPanel(panel: PanelId): panel is TrackedPanelId {
-  return TRACKED_PANEL_SET.has(panel);
+  return TRACKED_PANEL_SET.has(panel) || isCustomFavoritePanel(panel);
 }
 
 function getRootPathForPanel(
@@ -263,6 +273,14 @@ export const App: React.FC = () => {
   const [loading, setLoading] = useState<boolean>(true);
   const [emptyingTrash, setEmptyingTrash] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  const [searchOpen, setSearchOpen] = useState<boolean>(false);
+  const [searchQuery, setSearchQuery] = useState<string>("");
+  const [searchListing, setSearchListing] = useState<DirectoryListing | null>(null);
+  const [searchLoading, setSearchLoading] = useState<boolean>(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const searchRequestIdRef = useRef<number>(0);
+  const searchDebounceRef = useRef<number | null>(null);
   const mockTrashEntriesRef = useRef<FileEntry[]>([
     {
       name: "Old Draft.docx",
@@ -393,17 +411,43 @@ export const App: React.FC = () => {
       if (next.length === customFavoritesRef.current.length) return;
       customFavoritesRef.current = next;
       setCustomFavorites(next);
-      persistCustomFavorites(next);
 
+      // Prune saved panel state for the removed custom favorite
+      const nextPanelStates: Partial<Record<TrackedPanelId, PanelState>> = {};
+      for (const [panelKey, state] of Object.entries(
+        panelStatesRef.current
+      ) as Array<[TrackedPanelId, PanelState | undefined]>) {
+        if (
+          !state ||
+          (panelKey.startsWith("fav:") &&
+            normalizePathKey(panelKey.slice(4)) === targetKey)
+        ) {
+          continue;
+        }
+        nextPanelStates[panelKey] = state;
+      }
+      panelStatesRef.current = nextPanelStates;
+
+      let activeWasRemoved = false;
       if (
         activePanelRef.current.startsWith("fav:") &&
         normalizePathKey(activePanelRef.current.slice(4)) === targetKey
       ) {
+        activeWasRemoved = true;
         activePanelRef.current = "home";
         setActivePanel("home");
       }
+      if (
+        lastTrackedPanelRef.current.startsWith("fav:") &&
+        normalizePathKey(lastTrackedPanelRef.current.slice(4)) === targetKey
+      ) {
+        lastTrackedPanelRef.current = "home";
+      }
+
+      persistCustomFavorites(next);
+      persistPanelStates(activeWasRemoved ? "home" : undefined);
     },
-    [persistCustomFavorites]
+    [persistCustomFavorites, persistPanelStates]
   );
 
   // Pointer-event-based in-app folder drag-and-drop into Favorites (WebView2 compatible)
@@ -824,6 +868,27 @@ export const App: React.FC = () => {
         persisted?.activePanel && isTrackedPanel(persisted.activePanel)
           ? persisted.activePanel
           : "home";
+      if (isCustomFavoritePanel(initialPanel)) {
+        const favKey = normalizePathKey(initialPanel.slice(4));
+        const matchedFav = initialFavorites.find(
+          (fav) => normalizePathKey(fav.path) === favKey
+        );
+        if (!matchedFav) {
+          initialPanel = "home";
+        } else {
+          let favRootExists = true;
+          if (isTauriRuntime()) {
+            try {
+              favRootExists = await invoke<boolean>("check_directory_exists", {
+                path: matchedFav.path,
+              });
+            } catch {
+              favRootExists = false;
+            }
+          }
+          initialPanel = favRootExists ? (`fav:${matchedFav.path}` as CustomFavoritePanelId) : "home";
+        }
+      }
       let rootPath = getRootPathForPanel(initialPanel, resolvedLocations);
       if (rootPath === null) {
         initialPanel = "home";
@@ -833,10 +898,14 @@ export const App: React.FC = () => {
       const savedPanel = panelStatesRef.current[initialPanel];
       const initialViewMode = savedPanel?.viewMode ?? DEFAULT_VIEW_MODE;
       const initialSort = savedPanel?.sort ?? DEFAULT_SORT;
-      const targetPath = await resolvePanelTarget(savedPanel?.lastPath, rootPath);
+      const validSavedLastPath =
+        savedPanel?.lastPath && isPathWithinRoot(savedPanel.lastPath, rootPath)
+          ? savedPanel.lastPath
+          : null;
+      const targetPath = await resolvePanelTarget(validSavedLastPath, rootPath);
       const sameAsSaved = Boolean(
-        savedPanel?.lastPath &&
-          targetPath.toLowerCase() === savedPanel.lastPath.toLowerCase()
+        validSavedLastPath &&
+          targetPath.toLowerCase() === validSavedLastPath.toLowerCase()
       );
       const initialExpanded = sameAsSaved ? (savedPanel?.expandedPaths ?? []) : [];
       const initialColumns = sameAsSaved ? (savedPanel?.columnPaths ?? []) : [];
@@ -935,9 +1004,129 @@ export const App: React.FC = () => {
   }, [handleAddFavorites]);
 
   const activePath = pendingPath ?? listing?.currentPath ?? "";
+  const trimmedSearch = searchQuery.trim();
+  const isSearchMode = searchOpen && trimmedSearch.length > 0;
+
+  const clearSearch = useCallback(() => {
+    searchRequestIdRef.current += 1;
+    if (searchDebounceRef.current !== null) {
+      window.clearTimeout(searchDebounceRef.current);
+      searchDebounceRef.current = null;
+    }
+    setSearchOpen(false);
+    setSearchQuery("");
+    setSearchListing(null);
+    setSearchLoading(false);
+    setSearchError(null);
+    setSelectedEntry(null);
+  }, []);
+
+  const handleOpenSearch = useCallback(() => {
+    setSearchOpen(true);
+    requestAnimationFrame(() => {
+      searchInputRef.current?.focus();
+      searchInputRef.current?.select();
+    });
+  }, []);
+
+  const runSearch = useCallback(
+    async (rawQuery: string, overrideShowHidden?: boolean) => {
+      const q = rawQuery.trim();
+      const reqId = ++searchRequestIdRef.current;
+      if (!q) {
+        setSearchListing(null);
+        setSearchLoading(false);
+        setSearchError(null);
+        return;
+      }
+
+      const scopePath =
+        listing && listing.currentPath && !listing.currentPath.startsWith("virtual://")
+          ? listing.currentPath
+          : (locationsRef.current?.homePath ?? null);
+      const includeHidden = overrideShowHidden ?? showHiddenRef.current;
+
+      setSearchError(null);
+      setSelectedEntry(null);
+
+      if (!isTauriRuntime()) {
+        const lower = q.toLowerCase();
+        const matches = MOCK_PREVIEW_LISTING.entries.filter((e) =>
+          e.name.toLowerCase().includes(lower)
+        );
+        setSearchListing({
+          currentPath: `virtual://search?q=${q}`,
+          currentName: `Search: "${q}"`,
+          homePath: "~",
+          homeName: "Home",
+          breadcrumbs: listing?.breadcrumbs ?? MOCK_PREVIEW_LISTING.breadcrumbs,
+          entries: matches,
+          emptyMessage: `No items matching "${q}"`,
+        });
+        setSearchLoading(false);
+        return;
+      }
+
+      setSearchLoading(true);
+      try {
+        const result = await invoke<DirectoryListing>("search_directory", {
+          query: q,
+          scopePath,
+          showHidden: includeHidden,
+        });
+        if (reqId !== searchRequestIdRef.current) return;
+        setSearchListing(result);
+        setSearchLoading(false);
+      } catch (err) {
+        if (reqId !== searchRequestIdRef.current) return;
+        setSearchError(typeof err === "string" ? err : String(err));
+        setSearchLoading(false);
+      }
+    },
+    [listing]
+  );
+
+  const handleSearchQueryChange = useCallback(
+    (next: string) => {
+      setSearchQuery(next);
+      if (searchDebounceRef.current !== null) {
+        window.clearTimeout(searchDebounceRef.current);
+        searchDebounceRef.current = null;
+      }
+      if (!next.trim()) {
+        searchRequestIdRef.current += 1;
+        setSearchListing(null);
+        setSearchLoading(false);
+        setSearchError(null);
+        return;
+      }
+      searchDebounceRef.current = window.setTimeout(() => {
+        searchDebounceRef.current = null;
+        void runSearch(next);
+      }, 280);
+    },
+    [runSearch]
+  );
+
+  const handleSearchSubmit = useCallback(() => {
+    if (searchDebounceRef.current !== null) {
+      window.clearTimeout(searchDebounceRef.current);
+      searchDebounceRef.current = null;
+    }
+    void runSearch(searchQuery);
+  }, [runSearch, searchQuery]);
+
+  useEffect(() => {
+    return () => {
+      if (searchDebounceRef.current !== null) {
+        window.clearTimeout(searchDebounceRef.current);
+      }
+    };
+  }, []);
 
   const navigateTo = useCallback(
     async (path: string, panelOverride?: PanelId, selectPath?: string | null) => {
+      clearSearch();
       const targetPanel = panelOverride ?? activePanelRef.current;
       const isSameDir =
         normalizePathKey(activePath) === normalizePathKey(path) &&
@@ -974,15 +1163,22 @@ export const App: React.FC = () => {
         });
         setHistoryIndex((idx) => idx + 1);
         if (isTrackedPanel(targetPanel)) {
+          const rootPath = getRootPathForPanel(targetPanel, locationsRef.current);
+          const withinRoot = rootPath
+            ? isPathWithinRoot(data.currentPath, rootPath)
+            : true;
           updateTrackedPanelState(targetPanel, {
-            lastPath: data.currentPath,
+            lastPath:
+              !withinRoot && isCustomFavoritePanel(targetPanel)
+                ? rootPath
+                : data.currentPath,
             expandedPaths: [],
             columnPaths: [],
           });
         }
       }
     },
-    [activePath, error, fetchDirectory, historyIndex, listing, updateTrackedPanelState]
+    [activePath, clearSearch, error, fetchDirectory, historyIndex, listing, updateTrackedPanelState]
   );
 
   const handleGoToPathSubmit = useCallback(
@@ -1041,6 +1237,7 @@ export const App: React.FC = () => {
 
   const handleSelectPanel = useCallback(
     async (panel: PanelId) => {
+      clearSearch();
       const rootPath = getRootPathForPanel(panel, locations);
       if (rootPath === null) return;
 
@@ -1083,18 +1280,23 @@ export const App: React.FC = () => {
         setViewMode(nextViewMode);
         setSortConfig(nextSort);
 
+        const validSavedLastPath =
+          saved?.lastPath && isPathWithinRoot(saved.lastPath, rootPath)
+            ? saved.lastPath
+            : null;
+
         // Clicking the already-active panel while inside a subfolder returns to its root
         let targetPath: string;
         if (wasSamePanel) {
           targetPath = rootPath;
         } else if (
-          saved?.lastPath &&
-          getCachedDirectory(saved.lastPath, showHiddenRef.current)
+          validSavedLastPath &&
+          getCachedDirectory(validSavedLastPath, showHiddenRef.current)
         ) {
           // Fast path: already cached in memory; background revalidation handles external deletion
-          targetPath = saved.lastPath;
+          targetPath = validSavedLastPath;
         } else {
-          targetPath = await resolvePanelTarget(saved?.lastPath, rootPath);
+          targetPath = await resolvePanelTarget(validSavedLastPath, rootPath);
         }
 
         if (activePath === targetPath && !error) {
@@ -1108,8 +1310,8 @@ export const App: React.FC = () => {
 
         const restoreSubState = Boolean(
           !wasSamePanel &&
-            saved?.lastPath &&
-            targetPath.toLowerCase() === saved.lastPath.toLowerCase()
+            validSavedLastPath &&
+            targetPath.toLowerCase() === validSavedLastPath.toLowerCase()
         );
         const nextExpanded = restoreSubState ? (saved?.expandedPaths ?? []) : [];
         const nextColumns = restoreSubState ? (saved?.columnPaths ?? []) : [];
@@ -1160,6 +1362,7 @@ export const App: React.FC = () => {
     },
     [
       activePath,
+      clearSearch,
       error,
       fetchDirectory,
       historyIndex,
@@ -1174,7 +1377,16 @@ export const App: React.FC = () => {
       setExpandedPaths(paths);
       const panel = activePanelRef.current;
       if (isTrackedPanel(panel)) {
-        updateTrackedPanelState(panel, { expandedPaths: paths });
+        const rootPath = getRootPathForPanel(panel, locationsRef.current);
+        const currentPath = listingRef.current?.currentPath;
+        if (
+          !isCustomFavoritePanel(panel) ||
+          !rootPath ||
+          !currentPath ||
+          isPathWithinRoot(currentPath, rootPath)
+        ) {
+          updateTrackedPanelState(panel, { expandedPaths: paths });
+        }
       }
     },
     [updateTrackedPanelState]
@@ -1185,7 +1397,16 @@ export const App: React.FC = () => {
       setColumnPaths(paths);
       const panel = activePanelRef.current;
       if (isTrackedPanel(panel)) {
-        updateTrackedPanelState(panel, { columnPaths: paths });
+        const rootPath = getRootPathForPanel(panel, locationsRef.current);
+        const currentPath = listingRef.current?.currentPath;
+        if (
+          !isCustomFavoritePanel(panel) ||
+          !rootPath ||
+          !currentPath ||
+          isPathWithinRoot(currentPath, rootPath)
+        ) {
+          updateTrackedPanelState(panel, { columnPaths: paths });
+        }
       }
     },
     [updateTrackedPanelState]
@@ -1411,7 +1632,10 @@ export const App: React.FC = () => {
     if (listing) {
       void fetchDirectory(listing.currentPath, { overrideShowHidden: next });
     }
-  }, [fetchDirectory, listing]);
+    if (isSearchMode) {
+      void runSearch(searchQuery, next);
+    }
+  }, [fetchDirectory, isSearchMode, listing, runSearch, searchQuery]);
 
   const handleOpenInTerminal = useCallback(async () => {
     if (!isTauriRuntime()) return;
@@ -1463,13 +1687,17 @@ export const App: React.FC = () => {
   }, [listing, selectedEntry]);
 
   const handleRefresh = useCallback(() => {
+    if (isSearchMode) {
+      void runSearch(searchQuery);
+      return;
+    }
     if (listing) {
       invalidateCachedDirectory(listing.currentPath);
       void fetchDirectory(listing.currentPath, { forceRefresh: true });
     } else {
       void fetchDirectory(undefined, { forceRefresh: true });
     }
-  }, [fetchDirectory, listing]);
+  }, [fetchDirectory, isSearchMode, listing, runSearch, searchQuery]);
 
   const handleEmptyTrash = useCallback(async () => {
     if (emptyingTrash) return;
@@ -1492,6 +1720,7 @@ export const App: React.FC = () => {
 
   const navigateHistoryTo = useCallback(
     async (nextIndex: number) => {
+      clearSearch();
       const entry = history[nextIndex];
       if (!entry) return;
       const targetPanel = entry.panel;
@@ -1529,11 +1758,20 @@ export const App: React.FC = () => {
       if (data) {
         setHistoryIndex(nextIndex);
         if (isTrackedPanel(targetPanel)) {
-          updateTrackedPanelState(targetPanel, { lastPath: data.currentPath });
+          const rootPath = getRootPathForPanel(targetPanel, locationsRef.current);
+          const withinRoot = rootPath
+            ? isPathWithinRoot(data.currentPath, rootPath)
+            : true;
+          updateTrackedPanelState(targetPanel, {
+            lastPath:
+              !withinRoot && isCustomFavoritePanel(targetPanel)
+                ? rootPath
+                : data.currentPath,
+          });
         }
       }
     },
-    [fetchDirectory, history, updateTrackedPanelState]
+    [clearSearch, fetchDirectory, history, updateTrackedPanelState]
   );
 
   const handleBack = useCallback(async () => {
@@ -1606,7 +1844,7 @@ export const App: React.FC = () => {
     };
   }, []);
 
-  // Keyboard support: Ctrl/Cmd+Shift+G opens Go to Path; Ctrl+, opens Settings; Backspace or Alt+Left goes back; dialog Escape/Enter handling
+  // Keyboard support: Ctrl/Cmd+F opens search; Ctrl/Cmd+Shift+G opens Go to Path; Ctrl+, opens Settings; Backspace or Alt+Left goes back; dialog Escape/Enter handling
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (missingFavorite) {
@@ -1644,6 +1882,12 @@ export const App: React.FC = () => {
         return;
       }
 
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
+        e.preventDefault();
+        handleOpenSearch();
+        return;
+      }
+
       const target = e.target as HTMLElement | null;
       const isEditable =
         target instanceof HTMLInputElement ||
@@ -1663,16 +1907,23 @@ export const App: React.FC = () => {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [goToPathOpen, handleBack, handleForward, handleRemoveFavorite, missingFavorite, settingsOpen]);
+  }, [goToPathOpen, handleBack, handleForward, handleOpenSearch, handleRemoveFavorite, missingFavorite, settingsOpen]);
 
   const isPendingNavigation = loading && pendingPath !== null;
-  const displayTitle = isPendingNavigation
-    ? labelForPendingPath(pendingPath, locations)
-    : listing?.currentName ?? "Home";
-  const loadingMessage =
-    pendingPath === "virtual://applications"
+  const displayTitle = isSearchMode
+    ? `Search: "${trimmedSearch}"`
+    : isPendingNavigation
+      ? labelForPendingPath(pendingPath, locations)
+      : listing?.currentName ?? "Home";
+  const loadingMessage = isSearchMode
+    ? `Searching for "${trimmedSearch}"…`
+    : pendingPath === "virtual://applications"
       ? "Loading applications…"
       : "Loading…";
+  const searchScopeName =
+    listing && listing.currentPath && !listing.currentPath.startsWith("virtual://")
+      ? listing.currentName
+      : (locations?.homeName ?? "Home");
 
   return (
     <div className="finder-window" onContextMenu={(e) => e.preventDefault()}>
@@ -1723,15 +1974,30 @@ export const App: React.FC = () => {
           onWindowClose={handleWindowClose}
           onWindowMinimize={handleWindowMinimize}
           onWindowMaximize={handleWindowMaximize}
+          searchOpen={searchOpen}
+          searchQuery={searchQuery}
+          searchInputRef={searchInputRef}
+          onOpenSearch={handleOpenSearch}
+          onSearchQueryChange={handleSearchQueryChange}
+          onSearchSubmit={handleSearchSubmit}
+          onCloseSearch={clearSearch}
         />
 
         <MainView
-          currentPath={activePath}
-          entries={isPendingNavigation ? [] : listing?.entries ?? []}
+          currentPath={isSearchMode ? (searchListing?.currentPath ?? `virtual://search?q=${trimmedSearch}`) : activePath}
+          entries={
+            isSearchMode
+              ? (searchListing?.entries ?? [])
+              : isPendingNavigation
+                ? []
+                : (listing?.entries ?? [])
+          }
           breadcrumbs={
-            isPendingNavigation && pendingPath
-              ? [{ name: displayTitle, path: pendingPath }]
-              : listing?.breadcrumbs ?? []
+            isSearchMode
+              ? (searchListing?.breadcrumbs ?? listing?.breadcrumbs ?? [])
+              : isPendingNavigation && pendingPath
+                ? [{ name: displayTitle, path: pendingPath }]
+                : listing?.breadcrumbs ?? []
           }
           homePath={listing?.homePath ?? locations?.homePath ?? ""}
           selectedPath={selectedEntry?.path ?? null}
@@ -1741,10 +2007,14 @@ export const App: React.FC = () => {
           expandedPaths={expandedPaths}
           columnPaths={columnPaths}
           revealRequest={revealRequest}
-          loading={loading}
+          loading={isSearchMode ? searchLoading : loading}
           loadingMessage={loadingMessage}
-          error={error}
-          emptyMessage={listing?.emptyMessage ?? null}
+          error={isSearchMode ? searchError : error}
+          emptyMessage={
+            isSearchMode
+              ? (searchListing?.emptyMessage ?? `No items matching "${trimmedSearch}"`)
+              : (listing?.emptyMessage ?? null)
+          }
           onSelect={setSelectedEntry}
           onOpenFolder={(p) => void navigateTo(p)}
           onOpenItem={(entry) => void handleOpenItem(entry)}
@@ -1753,9 +2023,12 @@ export const App: React.FC = () => {
           onExpandedPathsChange={handleExpandedPathsChange}
           onColumnPathsChange={handleColumnPathsChange}
           onStartFolderDrag={handleStartFolderDrag}
-          isTrashView={activePath === "virtual://trash"}
+          isTrashView={!isSearchMode && activePath === "virtual://trash"}
           emptyingTrash={emptyingTrash}
           onEmptyTrash={() => void handleEmptyTrash()}
+          searchQuery={isSearchMode ? trimmedSearch : null}
+          searchScopeName={isSearchMode ? searchScopeName : null}
+          onClearSearch={clearSearch}
         />
       </div>
 
