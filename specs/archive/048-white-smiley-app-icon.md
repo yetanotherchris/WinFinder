@@ -22,4 +22,4 @@ Update the WinFinder application icon so the Finder-style smiley face (eyes and 
 - Copied updated master PNG to `docs/icon.png` and `public/icon.png`.
 
 ## Amendments
-- None.
+- Clipped the white smile cleanly to the bottom two blue squares so the vertical center gap between them remains transparent and uninterrupted.
