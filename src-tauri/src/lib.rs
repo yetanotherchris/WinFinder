@@ -3458,10 +3458,94 @@ pub fn run() {
             check_directory_exists,
             validate_favorite_dirs,
             unlock_bitlocker_drive,
-            empty_trash
+            empty_trash,
+            read_file_preview
         ])
         .run(tauri::generate_context!())
         .expect("error while running WinFinder");
+}
+
+const MAX_TEXT_PREVIEW_BYTES: usize = 512 * 1024;
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextFilePreview {
+    pub content: String,
+    pub truncated: bool,
+    pub total_bytes: u64,
+    pub bytes_read: usize,
+    pub is_binary: bool,
+}
+
+fn read_file_preview_impl(path_str: &str, max_bytes: usize) -> Result<TextFilePreview, String> {
+    use std::io::Read;
+
+    let trimmed = path_str.trim();
+    if trimmed.is_empty() || trimmed.starts_with("virtual://") {
+        return Err("Cannot preview virtual or empty path.".to_string());
+    }
+
+    let path = Path::new(trimmed);
+    let meta = fs::metadata(path).map_err(|e| format!("Unable to read file metadata: {e}"))?;
+    if meta.is_dir() {
+        return Err("Cannot preview a directory as text.".to_string());
+    }
+
+    let total_bytes = meta.len();
+    let cap = max_bytes.clamp(1024, 2 * 1024 * 1024);
+    let mut file = fs::File::open(path).map_err(|e| format!("Unable to open file: {e}"))?;
+    let mut buf = Vec::with_capacity((total_bytes as usize).min(cap));
+    file.by_ref()
+        .take(cap as u64)
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("Unable to read file: {e}"))?;
+
+    let bytes_read = buf.len();
+    let truncated = total_bytes > bytes_read as u64;
+
+    let sample_len = bytes_read.min(8192);
+    let is_utf16_le = bytes_read >= 2 && buf[0] == 0xFF && buf[1] == 0xFE;
+    let is_utf16_be = bytes_read >= 2 && buf[0] == 0xFE && buf[1] == 0xFF;
+
+    if !is_utf16_le && !is_utf16_be && buf[..sample_len].contains(&0) {
+        return Ok(TextFilePreview {
+            content: String::new(),
+            truncated,
+            total_bytes,
+            bytes_read,
+            is_binary: true,
+        });
+    }
+
+    let content = if is_utf16_le {
+        let u16s: Vec<u16> = buf[2..]
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        String::from_utf16_lossy(&u16s)
+    } else if is_utf16_be {
+        let u16s: Vec<u16> = buf[2..]
+            .chunks_exact(2)
+            .map(|c| u16::from_be_bytes([c[0], c[1]]))
+            .collect();
+        String::from_utf16_lossy(&u16s)
+    } else {
+        let slice = buf.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&buf);
+        String::from_utf8_lossy(slice).into_owned()
+    };
+
+    Ok(TextFilePreview {
+        content,
+        truncated,
+        total_bytes,
+        bytes_read,
+        is_binary: false,
+    })
+}
+
+#[tauri::command]
+fn read_file_preview(path: String, max_bytes: Option<usize>) -> Result<TextFilePreview, String> {
+    read_file_preview_impl(&path, max_bytes.unwrap_or(MAX_TEXT_PREVIEW_BYTES))
 }
 
 #[cfg(test)]
@@ -4119,6 +4203,53 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
         assert!(actual_names.contains(&"Renamed.TXT".to_string()));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn read_file_preview_handles_text_truncation_binary_and_errors() {
+        let unique = format!(
+            "winfinder_preview_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let root = std::env::temp_dir().join(unique);
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        // Normal UTF-8 file with BOM
+        let txt_path = root.join("hello.txt");
+        let mut utf8_bom = vec![0xEF, 0xBB, 0xBF];
+        utf8_bom.extend_from_slice(b"Hello WinFinder!\nLine 2");
+        fs::write(&txt_path, utf8_bom).unwrap();
+        let res = read_file_preview_impl(&txt_path.to_string_lossy(), MAX_TEXT_PREVIEW_BYTES).unwrap();
+        assert_eq!(res.content, "Hello WinFinder!\nLine 2");
+        assert!(!res.truncated);
+        assert!(!res.is_binary);
+
+        // Truncation at cap (min clamp is 1024 bytes)
+        let big_path = root.join("big.log");
+        fs::write(&big_path, "a".repeat(2048)).unwrap();
+        let big_res = read_file_preview_impl(&big_path.to_string_lossy(), 1024).unwrap();
+        assert!(big_res.truncated);
+        assert_eq!(big_res.bytes_read, 1024);
+        assert_eq!(big_res.total_bytes, 2048);
+        assert!(!big_res.is_binary);
+
+        // Binary detection
+        let bin_path = root.join("data.bin");
+        fs::write(&bin_path, [0x7F, 0x45, 0x4C, 0x46, 0x00, 0x01, 0x02]).unwrap();
+        let bin_res = read_file_preview_impl(&bin_path.to_string_lossy(), MAX_TEXT_PREVIEW_BYTES).unwrap();
+        assert!(bin_res.is_binary);
+        assert!(bin_res.content.is_empty());
+
+        // Rejects directory & virtual paths
+        assert!(read_file_preview_impl(&root.to_string_lossy(), MAX_TEXT_PREVIEW_BYTES).is_err());
+        assert!(read_file_preview_impl("virtual://recents", MAX_TEXT_PREVIEW_BYTES).is_err());
 
         let _ = fs::remove_dir_all(&root);
     }

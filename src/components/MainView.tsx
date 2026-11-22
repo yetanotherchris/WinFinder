@@ -46,6 +46,7 @@ import {
   sortEntries,
 } from "../utils/format";
 import { FileIcon } from "./FileIcon";
+import { FilePreview } from "./FilePreview";
 import {
   entriesEqual,
   getCachedDirectory,
@@ -1694,9 +1695,18 @@ export const MainView: React.FC<MainViewProps> = ({
         <div className="gallery-view">
           <div className="gallery-stage">
             {galleryActiveItem && (
-              <div
-                className="gallery-hero"
-                {...getFolderDragProps(galleryActiveItem)}
+              <FilePreview
+                entry={galleryActiveItem}
+                isRenaming={isRenamingEntry(galleryActiveItem)}
+                renameInput={
+                  <InlineRenameInput
+                    entry={galleryActiveItem}
+                    variant="gallery"
+                    onCommit={(nextName) => void handleRenameCommit(galleryActiveItem, nextName)}
+                    onCancel={() => onCancelRename?.()}
+                  />
+                }
+                dragProps={getFolderDragProps(galleryActiveItem)}
                 onClick={(e) => {
                   if (galleryActiveItem.isDir && (e.ctrlKey || e.metaKey)) {
                     e.preventDefault();
@@ -1723,44 +1733,14 @@ export const MainView: React.FC<MainViewProps> = ({
                     onOpenItem(galleryActiveItem);
                   }
                 }}
-              >
-                <div className="gallery-hero-icon">
-                  <FileIcon
-                    name={galleryActiveItem.name}
-                    isDir={galleryActiveItem.isDir}
-                    entryKind={galleryActiveItem.entryKind}
-                    extension={galleryActiveItem.extension}
-                    iconDataUrl={galleryActiveItem.iconDataUrl}
-                    isLocked={galleryActiveItem.isLocked}
-                    size={124}
-                  />
-                </div>
-                {isRenamingEntry(galleryActiveItem) ? (
-                  <InlineRenameInput
-                    entry={galleryActiveItem}
-                    variant="gallery"
-                    onCommit={(nextName) => void handleRenameCommit(galleryActiveItem, nextName)}
-                    onCancel={() => onCancelRename?.()}
-                  />
-                ) : (
-                  <div className="gallery-hero-name">{galleryActiveItem.name}</div>
-                )}
-                <div className="gallery-hero-meta">
-                  <span>{getKindLabel(galleryActiveItem)}</span>
-                  {formatFileSize(galleryActiveItem) !== "--" && (
-                    <>
-                      <span className="meta-dot">•</span>
-                      <span>{formatFileSize(galleryActiveItem)}</span>
-                    </>
-                  )}
-                  {galleryActiveItem.modifiedMs && (
-                    <>
-                      <span className="meta-dot">•</span>
-                      <span>{formatDateModified(galleryActiveItem.modifiedMs)}</span>
-                    </>
-                  )}
-                </div>
-              </div>
+                onOpenExternal={() => {
+                  if (galleryActiveItem.isDir) {
+                    onOpenFolder(galleryActiveItem.path);
+                  } else {
+                    onOpenItem(galleryActiveItem);
+                  }
+                }}
+              />
             )}
           </div>
 
