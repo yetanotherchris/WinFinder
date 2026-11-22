@@ -2241,11 +2241,14 @@ export const App: React.FC = () => {
   const handleContextMenu = useCallback(
     async (entry: FileEntry) => {
       if (!isTauriRuntime()) return;
+      const currentPath = listing?.currentPath ?? null;
+      const isTrashItem = currentPath === "virtual://trash";
       try {
         const res = await invoke<ContextMenuResult>("show_context_menu", {
           path: entry.path,
           entryKind: entry.entryKind,
           isDir: entry.isDir,
+          isTrash: isTrashItem,
         });
         if (res.openInNewTab) {
           void openFolderInNewTab(entry.path);
@@ -2257,11 +2260,11 @@ export const App: React.FC = () => {
         }
         if (
           res.invoked &&
-          listing &&
-          (listing.currentPath === "virtual://trash" || !listing.currentPath.startsWith("virtual://"))
+          currentPath &&
+          (currentPath === "virtual://trash" || !currentPath.startsWith("virtual://"))
         ) {
-          invalidateCachedDirectory(listing.currentPath);
-          void fetchDirectory(listing.currentPath, { forceRefresh: true });
+          invalidateCachedDirectory(currentPath);
+          void fetchDirectory(currentPath, { forceRefresh: true });
         }
       } catch {
         // Ignore if shell context menu cannot be shown for a virtual entry
