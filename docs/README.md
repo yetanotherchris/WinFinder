@@ -1,3 +1,5 @@
+<img src="icon.png" alt="WinFinder" width="96" />
+
 # WinFinder
 A MacOS Finder inspired clone for Windows, written using specs and AI (Gemini 4 Neon), using Rust and Tauri.
 
