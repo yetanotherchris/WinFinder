@@ -1,6 +1,6 @@
 # 015 — Application State Persistence (`~/.winfinder`)
 
-- **Status:** In Progress
+- **Status:** Archived
 - **Date:** 2026-11-21
 - **Request:** "The application saves its state to ~/.winfinder as a JSON file. It should do this for the following: 1. window resize/size 2. window position 3. each of the panels states. This includes the view (list, icons etc.), sorting, last folder open (this should be each of the views, exception 'application' and 'drives', 'network' that exist in the left hand panel). For 3. - a case may exist where the folder no longer exists. It should if possible find the parent folder in this case, and if one doesn't exist just go to the root directory for that item, e.g. documents, downloads, home."
 

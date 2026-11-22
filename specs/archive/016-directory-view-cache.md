@@ -1,6 +1,6 @@
 # 016 — In-Memory Directory Cache & Deferred Loading Indicator
 
-- **Status:** In Progress
+- **Status:** Archived
 - **Date:** 2026-11-21
 - **Request:** "there is a short delay in rendering the view when you open directories in say, 'home', then click 'downloads' then click 'home' again (home meaning 'chris' on my computer). Can the views be cached in some way while the app is open? Or some tricks to speed it up"
 
