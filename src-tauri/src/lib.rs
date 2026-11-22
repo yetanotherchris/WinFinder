@@ -1553,9 +1553,63 @@ mod win_shell {
         drives
     }
 
-    fn is_recycle_bin_path(path: &str) -> bool {
+    pub(super) fn is_recycle_bin_path(path: &str) -> bool {
         let lower = path.replace('/', "\\").to_lowercase();
         lower.contains("\\$recycle.bin\\")
+            || lower.contains("::{645ff040-5081-101b-9f08-00aa002f954e}")
+            || lower.starts_with("trash://")
+    }
+
+    unsafe fn resolve_recycle_bin_shell_item(path: &str) -> Result<IShellItem, String> {
+        let recycle_bin: IShellItem =
+            SHGetKnownFolderItem(&FOLDERID_RecycleBinFolder, KF_FLAG_DEFAULT, None)
+                .map_err(|e| format!("Could not open Windows Recycle Bin: {}", e))?;
+
+        let relative_item: Result<IShellItem, _> =
+            SHCreateItemFromRelativeName(&recycle_bin, &HSTRING::from(path), None);
+        if let Ok(item) = relative_item {
+            return Ok(item);
+        }
+
+        let target_key = super::normalize_path_key(path);
+        let enum_items: IEnumShellItems = recycle_bin
+            .BindToHandler(None, &BHID_EnumItems)
+            .map_err(|e| format!("Could not enumerate Recycle Bin items: {}", e))?;
+
+        loop {
+            let mut batch: [Option<IShellItem>; 32] = Default::default();
+            let mut fetched = 0u32;
+            let hr = enum_items.Next(&mut batch, Some(&mut fetched));
+            if fetched == 0 {
+                break;
+            }
+
+            for item in batch.into_iter().take(fetched as usize).flatten() {
+                let matches_candidate = [
+                    SIGDN_FILESYSPATH,
+                    SIGDN_DESKTOPABSOLUTEPARSING,
+                    SIGDN_PARENTRELATIVEPARSING,
+                ]
+                .into_iter()
+                .any(|sigdn| {
+                    item.GetDisplayName(sigdn)
+                        .ok()
+                        .and_then(|p| pwstr_to_string(p))
+                        .map(|candidate| super::normalize_path_key(&candidate) == target_key)
+                        .unwrap_or(false)
+                });
+
+                if matches_candidate {
+                    return Ok(item);
+                }
+            }
+
+            if hr.is_err() || fetched < 32 {
+                break;
+            }
+        }
+
+        Err("Could not locate the selected item in the Recycle Bin".to_string())
     }
 
     unsafe fn get_context_menu_verb(
@@ -1610,19 +1664,23 @@ mod win_shell {
         path: &str,
         entry_kind: &str,
         is_dir: bool,
+        is_trash: bool,
     ) -> Result<ContextMenuResult, String> {
         const CUSTOM_OPEN_IN_NEW_TAB_ID: usize = 0x7FFF;
-        let can_rename = (entry_kind == "file" || entry_kind == "folder")
+        let is_trash_item = is_trash || is_recycle_bin_path(path);
+        let can_rename = !is_trash_item
+            && (entry_kind == "file" || entry_kind == "folder")
             && !path.starts_with("virtual://")
             && !path.starts_with("app://")
-            && !path.starts_with("trash://")
-            && !is_recycle_bin_path(path);
+            && !path.starts_with("trash://");
         unsafe {
             let co_hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
             let should_uninit = co_hr.is_ok();
 
             let result = (|| -> Result<ContextMenuResult, String> {
-                let shell_item: IShellItem = if entry_kind == "app" {
+                let shell_item: IShellItem = if is_trash_item {
+                    resolve_recycle_bin_shell_item(path)?
+                } else if entry_kind == "app" {
                     let aumid = path.strip_prefix("app://").unwrap_or(path);
                     let apps_folder: IShellItem =
                         SHGetKnownFolderItem(&FOLDERID_AppsFolder, KF_FLAG_DEFAULT, None)
@@ -1658,7 +1716,7 @@ mod win_shell {
                     return Err("Failed to populate context menu".to_string());
                 }
 
-                if is_dir && !path.starts_with("virtual://") {
+                if is_dir && !is_trash_item && !path.starts_with("virtual://") {
                     let open_tab_label = HSTRING::from("Open in New Tab");
                     let _ = InsertMenuW(
                         hmenu,
@@ -2632,8 +2690,10 @@ async fn show_context_menu(
     path: String,
     entry_kind: String,
     is_dir: Option<bool>,
+    is_trash: Option<bool>,
 ) -> Result<ContextMenuResult, String> {
     let dir_flag = is_dir.unwrap_or_else(|| entry_kind == "folder" || entry_kind == "drive");
+    let trash_flag = is_trash.unwrap_or(false);
     #[cfg(target_os = "windows")]
     {
         let hwnd_raw = window
@@ -2643,8 +2703,13 @@ async fn show_context_menu(
         let (tx, rx) = std::sync::mpsc::channel();
         window
             .run_on_main_thread(move || {
-                let res =
-                    win_shell::show_shell_context_menu(hwnd_raw, &path, &entry_kind, dir_flag);
+                let res = win_shell::show_shell_context_menu(
+                    hwnd_raw,
+                    &path,
+                    &entry_kind,
+                    dir_flag,
+                    trash_flag,
+                );
                 let _ = tx.send(res);
             })
             .map_err(|e| format!("Failed to dispatch context menu: {}", e))?;
@@ -2659,7 +2724,7 @@ async fn show_context_menu(
 
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = (window, path, entry_kind, dir_flag);
+        let _ = (window, path, entry_kind, dir_flag, trash_flag);
         Ok(ContextMenuResult {
             invoked: false,
             open_in_new_tab: false,
@@ -4121,5 +4186,22 @@ mod tests {
         assert!(actual_names.contains(&"Renamed.TXT".to_string()));
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn is_recycle_bin_path_detects_recycle_bin_variants() {
+        assert!(win_shell::is_recycle_bin_path(
+            r"C:\$Recycle.Bin\S-1-5-21-12345\$RABCDEF.txt"
+        ));
+        assert!(win_shell::is_recycle_bin_path(
+            r"d:/$RECYCLE.BIN/S-1-5-21-12345/$RFOLDER"
+        ));
+        assert!(win_shell::is_recycle_bin_path(
+            r"::{645FF040-5081-101B-9F08-00AA002F954E}\C:\$Recycle.Bin\S-1-5-21-12345\$R1.txt"
+        ));
+        assert!(win_shell::is_recycle_bin_path("trash://item-1"));
+        assert!(!win_shell::is_recycle_bin_path(r"C:\Users\chris\Documents\notes.txt"));
+        assert!(!win_shell::is_recycle_bin_path("virtual://trash"));
     }
 }
