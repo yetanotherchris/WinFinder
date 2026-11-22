@@ -133,3 +133,11 @@ export interface ContextMenuResult {
   openInNewTab: boolean;
   renameRequested: boolean;
 }
+
+export interface TextFilePreview {
+  content: string;
+  truncated: boolean;
+  totalBytes: number;
+  bytesRead: number;
+  isBinary: boolean;
+}
