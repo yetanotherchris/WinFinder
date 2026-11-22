@@ -20,6 +20,7 @@
   --bg-dialog-backdrop: rgba(0, 0, 0, 0.24);
   --bg-settings: #f5f5f7;
   --bg-settings-header: rgba(250, 250, 252, 0.96);
+  --bg-settings-tabs: rgba(246, 246, 248, 0.96);
   --bg-settings-footer: rgba(250, 250, 252, 0.85);
   --bg-settings-group: #ffffff;
   --bg-control: #ffffff;
@@ -96,6 +97,7 @@
   --bg-dialog-backdrop: rgba(0, 0, 0, 0.52);
   --bg-settings: #262629;
   --bg-settings-header: rgba(42, 42, 46, 0.96);
+  --bg-settings-tabs: rgba(38, 38, 42, 0.96);
   --bg-settings-footer: rgba(38, 38, 41, 0.92);
   --bg-settings-group: #313135;
   --bg-control: #3a3a3f;
@@ -1877,7 +1879,9 @@ body.is-dragging-folder-blocked * {
 /* ==================== SETTINGS DIALOG ==================== */
 .settings-dialog {
   width: 440px;
-  max-width: 100%;
+  max-width: calc(100vw - 40px);
+  height: 600px;
+  max-height: calc(100vh - 40px);
   background: var(--bg-settings);
   border: 1px solid var(--border-strong);
   border-radius: 12px;
@@ -1889,6 +1893,7 @@ body.is-dragging-folder-blocked * {
 
 .settings-dialog-header {
   height: 44px;
+  flex-shrink: 0;
   padding: 0 14px 0 18px;
   background: var(--bg-settings-header);
   border-bottom: 1px solid var(--border-hairline);
@@ -1928,9 +1933,10 @@ body.is-dragging-folder-blocked * {
   display: flex;
   align-items: center;
   justify-content: center;
+  flex-shrink: 0;
   gap: 6px;
   padding: 8px 18px;
-  background: rgba(246, 246, 248, 0.96);
+  background: var(--bg-settings-tabs);
   border-bottom: 1px solid var(--border-hairline);
 }
 
@@ -1953,12 +1959,12 @@ body.is-dragging-folder-blocked * {
 }
 
 .settings-tab-btn:hover {
-  background: rgba(0, 0, 0, 0.045);
+  background: var(--sidebar-hover);
   color: var(--text-primary);
 }
 
 .settings-tab-btn.is-active {
-  background: rgba(0, 0, 0, 0.08);
+  background: var(--sidebar-active);
   color: var(--accent-blue);
 }
 
@@ -1968,10 +1974,17 @@ body.is-dragging-folder-blocked * {
 }
 
 .settings-dialog-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
   padding: 16px 18px 18px;
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.settings-dialog-body > * {
+  flex-shrink: 0;
 }
 
 .settings-sidebar-body {
@@ -2004,7 +2017,7 @@ body.is-dragging-folder-blocked * {
 }
 
 .settings-reset-link:hover {
-  background: rgba(0, 99, 225, 0.08);
+  background: var(--selection-tint);
 }
 
 .settings-sidebar-group {
@@ -2024,7 +2037,7 @@ body.is-dragging-folder-blocked * {
 }
 
 .settings-sidebar-item:hover:not(.is-disabled) {
-  background: rgba(0, 0, 0, 0.03);
+  background: var(--sidebar-hover);
 }
 
 .settings-sidebar-item.is-disabled {
@@ -2224,6 +2237,7 @@ body.is-dragging-folder-blocked * {
 }
 
 .settings-dialog-footer {
+  flex-shrink: 0;
   padding: 10px 18px 14px;
   border-top: 1px solid var(--border-subtle);
   background: var(--bg-settings-footer);
