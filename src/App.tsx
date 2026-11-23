@@ -175,11 +175,13 @@ function loadBrowserCustomFavorites(): FavoriteFolder[] {
   }
 }
 
-interface InAppFolderDrag {
-  folder: FavoriteFolder;
+interface InAppItemDrag {
+  entry: FileEntry;
   clientX: number;
   clientY: number;
   dropState: FavoriteDropState;
+  dropTargetFolderPath: string | null;
+  dropTargetFolderName: string | null;
 }
 
 const FOLDER_DRAG_THRESHOLD_PX = 6;
@@ -462,7 +464,7 @@ export const App: React.FC = () => {
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [settingsOpen, setSettingsOpen] = useState<boolean>(false);
   const [isWindowMaximized, setIsWindowMaximized] = useState<boolean>(false);
-  const [inAppDrag, setInAppDrag] = useState<InAppFolderDrag | null>(null);
+  const [inAppDrag, setInAppDrag] = useState<InAppItemDrag | null>(null);
   const [osDragOverFavorites, setOsDragOverFavorites] = useState<boolean>(false);
   const [missingFavorite, setMissingFavorite] = useState<FavoriteFolder | null>(null);
   const [goToPathOpen, setGoToPathOpen] = useState<boolean>(false);
@@ -473,6 +475,9 @@ export const App: React.FC = () => {
   renamingPathRef.current = renamingPath;
   const [refreshSeq, setRefreshSeq] = useState<number>(0);
   const mockClipboardRef = useRef<FileEntry | null>(null);
+  const moveItemHandlerRef = useRef<((entry: FileEntry, destDir: string) => Promise<void>) | null>(
+    null
+  );
   const unlockingDriveRef = useRef<string | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const searchRequestIdByTabRef = useRef<Map<string, number>>(new Map());
@@ -659,9 +664,9 @@ export const App: React.FC = () => {
     [persistCustomFavorites, persistPanelStates]
   );
 
-  // Pointer-event-based in-app folder drag-and-drop into Favorites (WebView2 compatible)
-  const handleStartFolderDrag = useCallback(
-    (folder: FavoriteFolder, downEvent: React.PointerEvent) => {
+  // Pointer-event-based in-app drag-and-drop for files and folders (into folders, breadcrumbs, or Favorites)
+  const handleStartItemDrag = useCallback(
+    (entry: FileEntry, downEvent: React.PointerEvent) => {
       dragCleanupRef.current?.();
 
       const startX = downEvent.clientX;
@@ -669,29 +674,87 @@ export const App: React.FC = () => {
       const pointerId = downEvent.pointerId;
       let dragging = false;
 
-      const evaluatePoint = (clientX: number, clientY: number): FavoriteDropState => {
-        const el = favoritesSectionRef.current;
-        if (!el) return "none";
-        const rect = el.getBoundingClientRect();
-        const inside =
-          clientX >= rect.left &&
-          clientX <= rect.right &&
-          clientY >= rect.top &&
-          clientY <= rect.bottom;
-        if (!inside) return "none";
+      const evaluatePoint = (
+        clientX: number,
+        clientY: number
+      ): {
+        dropState: FavoriteDropState;
+        dropTargetFolderPath: string | null;
+        dropTargetFolderName: string | null;
+      } => {
+        // 1. Check Favorites sidebar drop zone (folders only)
+        if (entry.isDir) {
+          const favEl = favoritesSectionRef.current;
+          if (favEl) {
+            const rect = favEl.getBoundingClientRect();
+            const inside =
+              clientX >= rect.left &&
+              clientX <= rect.right &&
+              clientY >= rect.top &&
+              clientY <= rect.bottom;
+            if (inside) {
+              const locs = locationsRef.current;
+              const current = customFavoritesRef.current;
+              if (isPathInFavorites(entry.path, locs, current)) {
+                return {
+                  dropState: "duplicate",
+                  dropTargetFolderPath: null,
+                  dropTargetFolderName: null,
+                };
+              }
+              if (countBuiltInFavorites(locs) + current.length >= MAX_FAVORITES_ITEMS) {
+                return {
+                  dropState: "full",
+                  dropTargetFolderPath: null,
+                  dropTargetFolderName: null,
+                };
+              }
+              return {
+                dropState: "accept",
+                dropTargetFolderPath: null,
+                dropTargetFolderName: null,
+              };
+            }
+          }
+        }
 
-        const locs = locationsRef.current;
-        const current = customFavoritesRef.current;
-        if (isPathInFavorites(folder.path, locs, current)) {
-          return "duplicate";
+        // 2. Check folder drop targets in main view / breadcrumbs / Miller columns
+        const elements = document.elementsFromPoint(clientX, clientY);
+        const srcKey = normalizePathKey(entry.path);
+        const srcParent = getParentDirPath(entry.path);
+        const srcParentKey = srcParent ? normalizePathKey(srcParent) : null;
+
+        for (const el of elements) {
+          const targetEl = (el as HTMLElement).closest?.("[data-drop-folder-path]") as HTMLElement | null;
+          if (!targetEl) continue;
+          const targetPath = targetEl.getAttribute("data-drop-folder-path");
+          if (!targetPath || targetPath.startsWith("virtual://")) continue;
+          const targetKey = normalizePathKey(targetPath);
+          if (targetKey === srcKey) continue;
+          if (srcParentKey && targetKey === srcParentKey) continue;
+          if (entry.isDir && isPathWithinRoot(targetPath, entry.path)) continue;
+
+          const targetName =
+            targetEl.getAttribute("data-drop-folder-name") ||
+            labelForPendingPath(targetPath, locationsRef.current);
+          return {
+            dropState: "none",
+            dropTargetFolderPath: targetPath,
+            dropTargetFolderName: targetName,
+          };
         }
-        if (countBuiltInFavorites(locs) + current.length >= MAX_FAVORITES_ITEMS) {
-          return "full";
-        }
-        return "accept";
+
+        return {
+          dropState: "none",
+          dropTargetFolderPath: null,
+          dropTargetFolderName: null,
+        };
       };
 
-      const setBodyDragClasses = (dropState: FavoriteDropState | null) => {
+      const setBodyDragClasses = (
+        dropState: FavoriteDropState | null,
+        hasFolderTarget: boolean
+      ) => {
         document.body.classList.remove(
           "is-dragging-folder",
           "is-dragging-folder-accept",
@@ -699,7 +762,7 @@ export const App: React.FC = () => {
         );
         if (dropState === null) return;
         document.body.classList.add("is-dragging-folder");
-        if (dropState === "accept") {
+        if (dropState === "accept" || hasFolderTarget) {
           document.body.classList.add("is-dragging-folder-accept");
         } else if (dropState === "duplicate" || dropState === "full") {
           document.body.classList.add("is-dragging-folder-blocked");
@@ -712,7 +775,7 @@ export const App: React.FC = () => {
         window.removeEventListener("pointercancel", onCancel);
         window.removeEventListener("blur", onCancel);
         window.removeEventListener("keydown", onKeyDown, true);
-        setBodyDragClasses(null);
+        setBodyDragClasses(null, false);
         setInAppDrag(null);
         dragCleanupRef.current = null;
       };
@@ -725,22 +788,24 @@ export const App: React.FC = () => {
           if (Math.hypot(dx, dy) < FOLDER_DRAG_THRESHOLD_PX) return;
           dragging = true;
         }
-        const dropState = evaluatePoint(moveEvent.clientX, moveEvent.clientY);
-        setBodyDragClasses(dropState);
+        const evalRes = evaluatePoint(moveEvent.clientX, moveEvent.clientY);
+        setBodyDragClasses(evalRes.dropState, evalRes.dropTargetFolderPath !== null);
         setInAppDrag({
-          folder,
+          entry,
           clientX: moveEvent.clientX,
           clientY: moveEvent.clientY,
-          dropState,
+          dropState: evalRes.dropState,
+          dropTargetFolderPath: evalRes.dropTargetFolderPath,
+          dropTargetFolderName: evalRes.dropTargetFolderName,
         });
       };
 
       const onPointerUp = (upEvent: PointerEvent) => {
         if (upEvent.pointerId !== pointerId) return;
         const wasDragging = dragging;
-        const finalDropState = wasDragging
+        const finalEval = wasDragging
           ? evaluatePoint(upEvent.clientX, upEvent.clientY)
-          : "none";
+          : { dropState: "none" as FavoriteDropState, dropTargetFolderPath: null, dropTargetFolderName: null };
         cleanup();
 
         if (wasDragging) {
@@ -753,8 +818,10 @@ export const App: React.FC = () => {
             window.removeEventListener("click", suppressClick, true);
           }, 0);
 
-          if (finalDropState === "accept") {
-            handleAddFavorites([folder]);
+          if (entry.isDir && finalEval.dropState === "accept") {
+            handleAddFavorites([{ name: entry.name, path: entry.path }]);
+          } else if (finalEval.dropTargetFolderPath) {
+            void moveItemHandlerRef.current?.(entry, finalEval.dropTargetFolderPath);
           }
         }
       };
@@ -2430,6 +2497,54 @@ export const App: React.FC = () => {
     [fetchDirectory, isSearchMode, isTrashView, listing, runSearch, searchQuery, setSelectedEntry, updateActiveTab]
   );
 
+  const handleMoveItem = useCallback(
+    async (entry: FileEntry, destinationDir: string) => {
+      if (!isRenamableEntry(entry, isTrashView)) return;
+      if (!destinationDir || destinationDir.startsWith("virtual://")) return;
+
+      if (!isTauriRuntime()) {
+        updateActiveTab((prev) => ({
+          ...prev,
+          listing: prev.listing
+            ? {
+                ...prev.listing,
+                entries: prev.listing.entries.filter(
+                  (e) => normalizePathKey(e.path) !== normalizePathKey(entry.path)
+                ),
+              }
+            : prev.listing,
+          selectedEntry: null,
+        }));
+        return;
+      }
+
+      try {
+        await invoke<string>("move_item", {
+          sourcePath: entry.path,
+          destinationDir,
+        });
+        invalidateCachedDirectory(entry.path);
+        const parentDir = getParentDirPath(entry.path);
+        if (parentDir) {
+          invalidateCachedDirectory(parentDir);
+        }
+        invalidateCachedDirectory(destinationDir);
+        setSelectedEntry(null);
+        setRefreshSeq((s) => s + 1);
+        if (isSearchMode) {
+          await runSearch(searchQuery);
+        } else if (listing && !listing.currentPath.startsWith("virtual://")) {
+          invalidateCachedDirectory(listing.currentPath);
+          await fetchDirectory(listing.currentPath, { forceRefresh: true });
+        }
+      } catch (err) {
+        setRenameError(typeof err === "string" ? err : String(err));
+      }
+    },
+    [fetchDirectory, isSearchMode, isTrashView, listing, runSearch, searchQuery, setSelectedEntry, updateActiveTab]
+  );
+  moveItemHandlerRef.current = handleMoveItem;
+
   const handleCopyPath = useCallback(async (entry: FileEntry) => {
     try {
       await navigator.clipboard.writeText(entry.path);
@@ -3141,7 +3256,8 @@ export const App: React.FC = () => {
           onChangeSort={handleChangeSort}
           onExpandedPathsChange={handleExpandedPathsChange}
           onColumnPathsChange={handleColumnPathsChange}
-          onStartFolderDrag={handleStartFolderDrag}
+          onStartItemDrag={handleStartItemDrag}
+          dropTargetFolderPath={inAppDrag?.dropTargetFolderPath ?? null}
           refreshSeq={refreshSeq}
           onNewFolderInDir={(dir, startRename) => void handleNewFolder(dir, startRename)}
           onNewFileInDir={(dir, baseName, ext) => void handleNewFile(baseName, ext, dir)}
@@ -3183,7 +3299,7 @@ export const App: React.FC = () => {
       {inAppDrag && (
         <div
           className={`folder-drag-ghost ${
-            inAppDrag.dropState === "accept"
+            inAppDrag.dropState === "accept" || inAppDrag.dropTargetFolderPath
               ? "is-accept"
               : inAppDrag.dropState === "duplicate" || inAppDrag.dropState === "full"
                 ? "is-blocked"
@@ -3195,16 +3311,21 @@ export const App: React.FC = () => {
           aria-hidden="true"
         >
           <FileIcon
-            name={inAppDrag.folder.name}
-            isDir
-            entryKind="folder"
-            extension={null}
-            iconDataUrl={null}
+            name={inAppDrag.entry.name}
+            isDir={inAppDrag.entry.isDir}
+            entryKind={inAppDrag.entry.entryKind}
+            extension={inAppDrag.entry.extension}
+            iconDataUrl={inAppDrag.entry.iconDataUrl}
             size={18}
           />
-          <span className="folder-drag-ghost-label">{inAppDrag.folder.name}</span>
+          <span className="folder-drag-ghost-label">{inAppDrag.entry.name}</span>
           {inAppDrag.dropState === "accept" && (
             <span className="folder-drag-ghost-badge">+</span>
+          )}
+          {inAppDrag.dropTargetFolderName && (
+            <span className="folder-drag-ghost-move-hint">
+              Move to {inAppDrag.dropTargetFolderName}
+            </span>
           )}
         </div>
       )}

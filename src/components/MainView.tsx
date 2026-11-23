@@ -28,7 +28,6 @@ import type {
   BitlockerNotice,
   BreadcrumbItem,
   DirectoryListing,
-  FavoriteFolder,
   FileEntry,
   SortConfig,
   SortField,
@@ -94,7 +93,8 @@ interface MainViewProps {
   onChangeSort: (next: SortConfig) => void;
   onExpandedPathsChange: (paths: string[]) => void;
   onColumnPathsChange: (paths: string[]) => void;
-  onStartFolderDrag?: (folder: FavoriteFolder, e: React.PointerEvent) => void;
+  onStartItemDrag?: (entry: FileEntry, e: React.PointerEvent) => void;
+  dropTargetFolderPath?: string | null;
   refreshSeq?: number;
   onNewFolderInDir?: (dirPath: string, startRename?: boolean) => void;
   onNewFileInDir?: (dirPath: string, baseName: string, extension: string | null) => void;
@@ -270,7 +270,8 @@ export const MainView: React.FC<MainViewProps> = ({
   onChangeSort,
   onExpandedPathsChange,
   onColumnPathsChange,
-  onStartFolderDrag,
+  onStartItemDrag,
+  dropTargetFolderPath = null,
   refreshSeq = 0,
   onNewFolderInDir,
   onNewFileInDir,
@@ -345,8 +346,23 @@ export const MainView: React.FC<MainViewProps> = ({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [confirmEmptyOpen]);
 
-  const isDraggableFavoriteFolder = (entry: FileEntry): boolean =>
-    !isTrashView && entry.isDir && !entry.path.startsWith("virtual://");
+  const isDraggableEntry = (entry: FileEntry): boolean =>
+    !isTrashView &&
+    (entry.entryKind === "file" || entry.entryKind === "folder") &&
+    !entry.path.startsWith("virtual://") &&
+    !entry.path.startsWith("app://") &&
+    !entry.path.startsWith("trash://");
+
+  const isDroppableFolder = (entry: FileEntry): boolean =>
+    !isTrashView &&
+    entry.isDir &&
+    !entry.isLocked &&
+    !entry.path.startsWith("virtual://") &&
+    !entry.path.startsWith("trash://");
+
+  const isDropTarget = (folderPath: string): boolean =>
+    dropTargetFolderPath !== null &&
+    normalizePathKey(dropTargetFolderPath) === normalizePathKey(folderPath);
 
   const isRenamingEntry = (entry: FileEntry): boolean =>
     renamingPath !== null && normalizePathKey(renamingPath) === normalizePathKey(entry.path);
@@ -443,15 +459,24 @@ export const MainView: React.FC<MainViewProps> = ({
     }
   };
 
-  const getFolderDragProps = (entry: FileEntry) => {
-    if (!isDraggableFavoriteFolder(entry) || isRenamingEntry(entry)) return {};
+  const getItemDragProps = (entry: FileEntry): React.HTMLAttributes<HTMLElement> => {
+    const dropAttrs: Record<string, string> = isDroppableFolder(entry)
+      ? {
+          "data-drop-folder-path": entry.path,
+          "data-drop-folder-name": entry.name,
+        }
+      : {};
+    if (!isDraggableEntry(entry) || isRenamingEntry(entry)) {
+      return dropAttrs as React.HTMLAttributes<HTMLElement>;
+    }
     return {
+      ...dropAttrs,
       onPointerDown: (e: React.PointerEvent) => {
         if (e.button !== 0 || e.ctrlKey || e.metaKey) return;
         if ((e.target as HTMLElement | null)?.closest(".list-disclosure-btn")) return;
-        onStartFolderDrag?.({ name: entry.name, path: entry.path }, e);
+        onStartItemDrag?.(entry, e);
       },
-    };
+    } as React.HTMLAttributes<HTMLElement>;
   };
 
   const openBackgroundContextMenu = (e: React.MouseEvent, targetDir: string) => {
@@ -1481,8 +1506,8 @@ export const MainView: React.FC<MainViewProps> = ({
                     role="row"
                     tabIndex={0}
                     style={listGridStyle}
-                    className={`list-row ${idx % 2 === 1 ? "alt" : ""} ${isSelected ? "selected" : ""} ${isRenaming ? "is-renaming" : ""}`}
-                    {...getFolderDragProps(entry)}
+                    className={`list-row ${idx % 2 === 1 ? "alt" : ""} ${isSelected ? "selected" : ""} ${isRenaming ? "is-renaming" : ""} ${isDropTarget(entry.path) ? "is-drop-target" : ""}`}
+                    {...getItemDragProps(entry)}
                     onClick={(e) => {
                       e.stopPropagation();
                       if (isRenaming) return;
@@ -1596,6 +1621,7 @@ export const MainView: React.FC<MainViewProps> = ({
                 <div
                   className="miller-column-scroll"
                   onContextMenu={(e) => openBackgroundContextMenu(e, col.path)}
+                  data-drop-folder-path={col.path && !col.path.startsWith("virtual://") ? col.path : undefined}
                 >
                   {col.loading ? (
                     <div className="miller-empty">
@@ -1649,8 +1675,8 @@ export const MainView: React.FC<MainViewProps> = ({
                         <button
                           key={entry.path}
                           type="button"
-                          className={`miller-row ${isSelected ? "selected" : ""} ${isTrail && !isSelected ? "trail" : ""}`}
-                          {...getFolderDragProps(entry)}
+                          className={`miller-row ${isSelected ? "selected" : ""} ${isTrail && !isSelected ? "trail" : ""} ${isDropTarget(entry.path) ? "is-drop-target" : ""}`}
+                          {...getItemDragProps(entry)}
                           onClick={(e) => {
                             if (entry.isDir && (e.ctrlKey || e.metaKey)) {
                               e.preventDefault();
@@ -1779,7 +1805,7 @@ export const MainView: React.FC<MainViewProps> = ({
                     onCancel={() => onCancelRename?.()}
                   />
                 }
-                dragProps={getFolderDragProps(galleryActiveItem)}
+                dragProps={getItemDragProps(galleryActiveItem)}
                 onClick={(e) => {
                   if (galleryActiveItem.isDir && (e.ctrlKey || e.metaKey)) {
                     e.preventDefault();
@@ -1826,8 +1852,8 @@ export const MainView: React.FC<MainViewProps> = ({
                   type="button"
                   role="option"
                   aria-selected={isSelected}
-                  className={`gallery-thumb ${isSelected ? "selected" : ""}`}
-                  {...getFolderDragProps(entry)}
+                  className={`gallery-thumb ${isSelected ? "selected" : ""} ${isDropTarget(entry.path) ? "is-drop-target" : ""}`}
+                  {...getItemDragProps(entry)}
                   onClick={(e) => {
                     if (entry.isDir && (e.ctrlKey || e.metaKey)) {
                       e.preventDefault();
@@ -1917,8 +1943,8 @@ export const MainView: React.FC<MainViewProps> = ({
             <button
               key={entry.path}
               type="button"
-              className={`icon-tile ${isSelected ? "selected" : ""}`}
-              {...getFolderDragProps(entry)}
+              className={`icon-tile ${isSelected ? "selected" : ""} ${isDropTarget(entry.path) ? "is-drop-target" : ""}`}
+              {...getItemDragProps(entry)}
               onClick={(e) => {
                 e.stopPropagation();
                 if (entry.isDir && (e.ctrlKey || e.metaKey)) {
@@ -2291,7 +2317,9 @@ export const MainView: React.FC<MainViewProps> = ({
               )}
               <button
                 type="button"
-                className={`pathbar-crumb ${isLast ? "current" : ""}`}
+                className={`pathbar-crumb ${isLast ? "current" : ""} ${isDropTarget(crumb.path) ? "is-drop-target" : ""}`}
+                data-drop-folder-path={!crumb.path.startsWith("virtual://") ? crumb.path : undefined}
+                data-drop-folder-name={crumb.name}
                 title={crumb.path}
                 onClick={(e) => {
                   if (e.ctrlKey || e.metaKey) {
