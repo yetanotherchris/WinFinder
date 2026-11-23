@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { AlertTriangle } from "lucide-react";
@@ -465,6 +466,8 @@ export const App: React.FC = () => {
   const [emptyingTrash, setEmptyingTrash] = useState<boolean>(false);
   const [renamingPath, setRenamingPath] = useState<string | null>(null);
   const [renameError, setRenameError] = useState<string | null>(null);
+  const renamingPathRef = useRef<string | null>(renamingPath);
+  renamingPathRef.current = renamingPath;
   const unlockingDriveRef = useRef<string | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const searchRequestIdByTabRef = useRef<Map<string, number>>(new Map());
@@ -2543,6 +2546,85 @@ export const App: React.FC = () => {
       if (unlisten) unlisten();
     };
   }, []);
+
+  // Watch the active filesystem directory for external changes and silently refresh
+  const watchedDirPath =
+    !isSearchMode && listing?.currentPath && !listing.currentPath.startsWith("virtual://")
+      ? listing.currentPath
+      : null;
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    void invoke("watch_directory", { path: watchedDirPath });
+  }, [watchedDirPath]);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let cancelled = false;
+    let unlisten: (() => void) | null = null;
+
+    void listen<string>("directory-changed", (event) => {
+      if (cancelled) return;
+      const changedPath = event.payload;
+      if (!changedPath || renamingPathRef.current) return;
+      invalidateCachedDirectory(changedPath);
+      const current = listingRef.current;
+      if (
+        current &&
+        !current.currentPath.startsWith("virtual://") &&
+        normalizePathKey(current.currentPath) === normalizePathKey(changedPath)
+      ) {
+        const tabId = activeTabIdRef.current;
+        const includeHidden = showHiddenRef.current;
+        void invoke<DirectoryListing>("list_directory", {
+          path: current.currentPath,
+          showHidden: includeHidden,
+        })
+          .then((fresh) => {
+            if (cancelled) return;
+            setCachedDirectory(fresh.currentPath, includeHidden, fresh);
+            if (
+              listingRef.current &&
+              normalizePathKey(listingRef.current.currentPath) ===
+                normalizePathKey(fresh.currentPath) &&
+              !listingsEqual(listingRef.current, fresh)
+            ) {
+              updateTab(tabId, (prev) => {
+                const prevSelKey = prev.selectedEntry
+                  ? normalizePathKey(prev.selectedEntry.path)
+                  : null;
+                const preservedSel = prevSelKey
+                  ? (fresh.entries.find((e) => normalizePathKey(e.path) === prevSelKey) ?? null)
+                  : null;
+                return {
+                  ...prev,
+                  listing: fresh,
+                  selectedEntry: preservedSel,
+                };
+              });
+            }
+          })
+          .catch(() => {
+            // Ignore transient read errors while external writers are active
+          });
+      }
+    })
+      .then((fn) => {
+        if (cancelled) {
+          fn();
+        } else {
+          unlisten = fn;
+        }
+      })
+      .catch(() => {
+        // Ignore if event listener is unavailable
+      });
+
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  }, [updateTab]);
 
   // Keyboard support: Ctrl/Cmd+F opens search; Ctrl/Cmd+Shift+G opens Go to Path; Ctrl+, opens Settings; Backspace or Alt+Left goes back; dialog Escape/Enter handling
   useEffect(() => {

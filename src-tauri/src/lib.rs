@@ -7,7 +7,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 const TRACKED_PANELS: &[&str] = &["recents", "desktop", "documents", "downloads", "home"];
 const MAX_FAVORITES: usize = 10;
@@ -1107,14 +1107,17 @@ mod win_shell {
     use windows::core::{GUID, HSTRING, Interface, PCSTR, PCWSTR, PSTR, PWSTR};
     use windows::Win32::Foundation::{
         CloseHandle, E_UNEXPECTED, GetLastError, GlobalFree, HANDLE, HWND, LPARAM, POINT,
-        PROPERTYKEY, SIZE, WPARAM,
+        PROPERTYKEY, SIZE, WAIT_EVENT, WAIT_OBJECT_0, WPARAM,
     };
     use windows::Win32::Graphics::Gdi::{
         CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits, GetObjectW, BITMAP, BITMAPINFO,
         BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP,
     };
     use windows::Win32::Storage::FileSystem::{
-        GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW,
+        FindCloseChangeNotification, FindFirstChangeNotificationW, FindNextChangeNotification,
+        GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW, FILE_NOTIFY_CHANGE_ATTRIBUTES,
+        FILE_NOTIFY_CHANGE_DIR_NAME, FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE,
+        FILE_NOTIFY_CHANGE_SIZE,
     };
     use windows::Win32::System::Com::{
         CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_APARTMENTTHREADED,
@@ -1126,7 +1129,9 @@ mod win_shell {
         GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE, GMEM_ZEROINIT,
     };
     use windows::Win32::System::Ole::CF_HDROP;
-    use windows::Win32::System::Threading::{WaitForSingleObject, INFINITE};
+    use windows::Win32::System::Threading::{
+        CreateEventW, SetEvent, WaitForMultipleObjects, WaitForSingleObject, INFINITE,
+    };
     use windows::Win32::UI::Shell::{
         BHID_EnumItems, BHID_SFUIObject, FOLDERID_AppsFolder, FOLDERID_RecycleBinFolder,
         IContextMenu, IDataTransferManagerInterop, IEnumShellItems, IShellItem, IShellItem2,
@@ -2113,6 +2118,118 @@ mod win_shell {
                 Err(e) => Err(format!("Failed to empty Recycle Bin: {}", e)),
             }
         }
+    }
+
+    pub struct WinDirWatchHandle {
+        stop_event_raw: isize,
+        join: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl WinDirWatchHandle {
+        pub fn stop(&mut self) {
+            if self.stop_event_raw != 0 {
+                unsafe {
+                    let _ = SetEvent(HANDLE(self.stop_event_raw as *mut _));
+                }
+            }
+            if let Some(join) = self.join.take() {
+                let _ = join.join();
+            }
+            if self.stop_event_raw != 0 {
+                unsafe {
+                    let _ = CloseHandle(HANDLE(self.stop_event_raw as *mut _));
+                }
+                self.stop_event_raw = 0;
+            }
+        }
+    }
+
+    impl Drop for WinDirWatchHandle {
+        fn drop(&mut self) {
+            self.stop();
+        }
+    }
+
+    pub fn start_directory_watcher<F>(path: String, on_change: F) -> Result<WinDirWatchHandle, String>
+    where
+        F: Fn(&str) + Send + 'static,
+    {
+        let stop_event = unsafe { CreateEventW(None, true, false, PCWSTR::null()) }
+            .map_err(|e| format!("Failed to create watcher stop event: {}", e))?;
+        let stop_event_raw = stop_event.0 as isize;
+
+        let wide_path = HSTRING::from(&path);
+        let notify_filter = FILE_NOTIFY_CHANGE_FILE_NAME
+            | FILE_NOTIFY_CHANGE_DIR_NAME
+            | FILE_NOTIFY_CHANGE_SIZE
+            | FILE_NOTIFY_CHANGE_LAST_WRITE
+            | FILE_NOTIFY_CHANGE_ATTRIBUTES;
+
+        let change_handle = unsafe {
+            FindFirstChangeNotificationW(PCWSTR(wide_path.as_ptr()), false, notify_filter)
+        };
+        let change_handle = match change_handle {
+            Ok(h) => h,
+            Err(e) => {
+                unsafe {
+                    let _ = CloseHandle(stop_event);
+                }
+                return Err(format!("Failed to watch directory: {}", e));
+            }
+        };
+        let change_handle_raw = change_handle.0 as isize;
+
+        let join = std::thread::spawn(move || {
+            let stop_h = HANDLE(stop_event_raw as *mut _);
+            let change_h = HANDLE(change_handle_raw as *mut _);
+            let handles = [stop_h, change_h];
+
+            loop {
+                let wait_res = unsafe { WaitForMultipleObjects(&handles, false, INFINITE) };
+                if wait_res == WAIT_OBJECT_0 {
+                    // Stop signaled
+                    break;
+                }
+                if wait_res == WAIT_EVENT(WAIT_OBJECT_0.0 + 1) {
+                    // Drain rapid burst of changes for ~220ms before notifying UI
+                    if unsafe { FindNextChangeNotification(change_h) }.is_err() {
+                        on_change(&path);
+                        break;
+                    }
+                    let mut stopped = false;
+                    loop {
+                        let drain_res = unsafe { WaitForMultipleObjects(&handles, false, 220) };
+                        if drain_res == WAIT_OBJECT_0 {
+                            stopped = true;
+                            break;
+                        }
+                        if drain_res == WAIT_EVENT(WAIT_OBJECT_0.0 + 1) {
+                            if unsafe { FindNextChangeNotification(change_h) }.is_err() {
+                                break;
+                            }
+                            continue;
+                        }
+                        // WAIT_TIMEOUT: burst settled
+                        break;
+                    }
+                    if stopped {
+                        break;
+                    }
+                    on_change(&path);
+                } else {
+                    break;
+                }
+            }
+
+            unsafe {
+                let _ = FindCloseChangeNotification(change_h);
+            }
+        });
+
+        Ok(WinDirWatchHandle {
+            stop_event_raw,
+            join: Some(join),
+        })
     }
 }
 
@@ -3412,6 +3529,166 @@ fn save_settings(
     }
 }
 
+struct DirWatcherManager {
+    state: Mutex<DirWatcherState>,
+}
+
+enum ActiveWatcher {
+    #[cfg(target_os = "windows")]
+    Win(win_shell::WinDirWatchHandle),
+    Poll {
+        stop: Arc<(Mutex<bool>, Condvar)>,
+        join: Option<std::thread::JoinHandle<()>>,
+    },
+}
+
+impl ActiveWatcher {
+    fn stop(mut self) {
+        match &mut self {
+            #[cfg(target_os = "windows")]
+            ActiveWatcher::Win(h) => h.stop(),
+            ActiveWatcher::Poll { stop, join } => {
+                {
+                    let mut stopped = stop.0.lock().unwrap();
+                    *stopped = true;
+                    stop.1.notify_all();
+                }
+                if let Some(j) = join.take() {
+                    let _ = j.join();
+                }
+            }
+        }
+    }
+}
+
+struct DirWatcherState {
+    watched_path: Option<String>,
+    handle: Option<ActiveWatcher>,
+}
+
+fn dir_fingerprint(path: &Path) -> Option<(Option<std::time::SystemTime>, usize)> {
+    let meta = fs::metadata(path).ok()?;
+    let modified = meta.modified().ok();
+    let count = fs::read_dir(path).ok()?.count();
+    Some((modified, count))
+}
+
+impl DirWatcherManager {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(DirWatcherState {
+                watched_path: None,
+                handle: None,
+            }),
+        }
+    }
+
+    fn stop(&self) {
+        let old = {
+            let mut guard = self.state.lock().unwrap();
+            guard.watched_path = None;
+            guard.handle.take()
+        };
+        if let Some(h) = old {
+            h.stop();
+        }
+    }
+
+    fn watch(&self, app: tauri::AppHandle, target_path: Option<String>) {
+        let next_path = target_path
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty() && !p.starts_with("virtual://") && Path::new(p).is_dir());
+
+        let old = {
+            let mut guard = self.state.lock().unwrap();
+            let same = match (&guard.watched_path, &next_path) {
+                (Some(a), Some(b)) => normalize_path_key(a) == normalize_path_key(b),
+                (None, None) => true,
+                _ => false,
+            };
+            if same {
+                return;
+            }
+            guard.watched_path = next_path.clone();
+            guard.handle.take()
+        };
+
+        if let Some(h) = old {
+            h.stop();
+        }
+
+        let Some(watch_path) = next_path else {
+            return;
+        };
+
+        let watcher = Self::spawn_watcher(app, watch_path.clone());
+        let mut guard = self.state.lock().unwrap();
+        if guard
+            .watched_path
+            .as_deref()
+            .map(|p| normalize_path_key(p) == normalize_path_key(&watch_path))
+            .unwrap_or(false)
+        {
+            guard.handle = Some(watcher);
+        } else {
+            drop(guard);
+            watcher.stop();
+        }
+    }
+
+    fn spawn_watcher(app: tauri::AppHandle, path: String) -> ActiveWatcher {
+        #[cfg(target_os = "windows")]
+        {
+            let app_clone = app.clone();
+            if let Ok(handle) = win_shell::start_directory_watcher(path.clone(), move |changed| {
+                let _ = app_clone.emit("directory-changed", changed.to_string());
+            }) {
+                return ActiveWatcher::Win(handle);
+            }
+        }
+
+        // Cross-platform / fallback lightweight polling watcher
+        let stop = Arc::new((Mutex::new(false), Condvar::new()));
+        let stop_clone = Arc::clone(&stop);
+        let join = std::thread::spawn(move || {
+            let p = PathBuf::from(&path);
+            let mut last = dir_fingerprint(&p);
+            let interval = Duration::from_secs(2);
+            loop {
+                let guard = stop_clone.0.lock().unwrap();
+                if *guard {
+                    break;
+                }
+                let (guard, _) = stop_clone.1.wait_timeout(guard, interval).unwrap();
+                if *guard {
+                    break;
+                }
+                drop(guard);
+
+                let current = dir_fingerprint(&p);
+                if current != last {
+                    last = current;
+                    let _ = app.emit("directory-changed", path.clone());
+                }
+            }
+        });
+
+        ActiveWatcher::Poll {
+            stop,
+            join: Some(join),
+        }
+    }
+}
+
+#[tauri::command]
+fn watch_directory(
+    app: tauri::AppHandle,
+    path: Option<String>,
+    watcher: tauri::State<'_, Arc<DirWatcherManager>>,
+) {
+    watcher.watch(app, path);
+}
+
 #[tauri::command]
 fn check_everything_cli_installed() -> bool {
     #[cfg(target_os = "windows")]
@@ -3523,6 +3800,7 @@ pub fn run() {
     let apps_cache = AppsCache::new();
     apps_cache.start_preload();
     let state_store = AppStateStore::load();
+    let dir_watcher = Arc::new(DirWatcherManager::new());
     let initial_path = InitialPath(resolve_initial_path_from_args(std::env::args().skip(1)));
     let window_ready = Arc::new(AtomicBool::new(false));
     let window_ready_for_setup = Arc::clone(&window_ready);
@@ -3531,6 +3809,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(apps_cache)
         .manage(Arc::clone(&state_store))
+        .manage(Arc::clone(&dir_watcher))
         .manage(initial_path)
         .setup(move |app| {
             if let Some(window) = app.get_webview_window("main") {
@@ -3595,6 +3874,8 @@ pub fn run() {
                         }
                     }
                     store.save_now();
+                    let watcher = window.state::<Arc<DirWatcherManager>>();
+                    watcher.stop();
                 }
                 _ => {}
             }
@@ -3613,6 +3894,7 @@ pub fn run() {
             rename_item,
             open_in_terminal,
             share_with_os,
+            watch_directory,
             load_app_state,
             save_panel_states,
             resolve_panel_path,
