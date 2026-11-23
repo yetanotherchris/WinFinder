@@ -1014,7 +1014,7 @@ mod win_shell {
     use windows::Storage::{IStorageItem, StorageFile};
     use windows::core::{GUID, HSTRING, Interface, PCSTR, PCWSTR, PSTR, PWSTR};
     use windows::Win32::Foundation::{
-        CloseHandle, E_UNEXPECTED, GetLastError, GlobalFree, HANDLE, HWND, LPARAM, POINT,
+        CloseHandle, E_UNEXPECTED, GetLastError, GlobalFree, HANDLE, HGLOBAL, HWND, LPARAM, POINT,
         PROPERTYKEY, SIZE, WPARAM,
     };
     use windows::Win32::Graphics::Gdi::{
@@ -1028,7 +1028,8 @@ mod win_shell {
         CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_APARTMENTTHREADED,
     };
     use windows::Win32::System::DataExchange::{
-        CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+        CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, RegisterClipboardFormatW,
+        SetClipboardData,
     };
     use windows::Win32::System::Memory::{
         GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE, GMEM_ZEROINIT,
@@ -1036,16 +1037,17 @@ mod win_shell {
     use windows::Win32::System::Ole::CF_HDROP;
     use windows::Win32::System::Threading::{WaitForSingleObject, INFINITE};
     use windows::Win32::UI::Shell::{
-        BHID_EnumItems, BHID_SFUIObject, FOLDERID_AppsFolder, FOLDERID_RecycleBinFolder,
-        IContextMenu, IDataTransferManagerInterop, IEnumShellItems, IShellItem, IShellItem2,
-        IShellItemImageFactory, SHCreateItemFromParsingName, SHCreateItemFromRelativeName,
-        SHEmptyRecycleBinW, SHGetKnownFolderItem, ShellExecuteExW, CMF_CANRENAME, CMF_EXPLORE,
-        CMF_NORMAL, CMIC_MASK_PTINVOKE, CMINVOKECOMMANDINFO, CMINVOKECOMMANDINFOEX, DROPFILES,
-        GCS_VERBA, GCS_VERBW, KF_FLAG_DEFAULT, SEE_MASK_FLAG_NO_UI, SEE_MASK_NOCLOSEPROCESS,
-        SEE_MASK_UNICODE,
-        SHELLEXECUTEINFOW, SHERB_NOCONFIRMATION, SHERB_NOPROGRESSUI,
-        SIGDN_DESKTOPABSOLUTEPARSING, SIGDN_FILESYSPATH, SIGDN_NORMALDISPLAY,
-        SIGDN_PARENTRELATIVEPARSING, SIIGBF_BIGGERSIZEOK, SIIGBF_ICONONLY,
+        BHID_EnumItems, BHID_SFUIObject, DragQueryFileW, FOLDERID_AppsFolder,
+        FOLDERID_RecycleBinFolder, IContextMenu, IDataTransferManagerInterop, IEnumShellItems,
+        IShellItem, IShellItem2, IShellItemImageFactory, SHCreateItemFromParsingName,
+        SHCreateItemFromRelativeName, SHEmptyRecycleBinW, SHFileOperationW, SHGetKnownFolderItem,
+        ShellExecuteExW, CMF_CANRENAME, CMF_EXPLORE, CMF_NORMAL, CMIC_MASK_PTINVOKE,
+        CMINVOKECOMMANDINFO, CMINVOKECOMMANDINFOEX, DROPFILES, FOF_ALLOWUNDO, FOF_NOCONFIRMATION,
+        FOF_NOERRORUI, FOF_SILENT, FO_DELETE, GCS_VERBA, GCS_VERBW, HDROP, KF_FLAG_DEFAULT,
+        SEE_MASK_FLAG_NO_UI, SEE_MASK_NOCLOSEPROCESS, SEE_MASK_UNICODE, SHELLEXECUTEINFOW,
+        SHERB_NOCONFIRMATION, SHERB_NOPROGRESSUI, SHFILEOPSTRUCTW, SIGDN_DESKTOPABSOLUTEPARSING,
+        SIGDN_FILESYSPATH, SIGDN_NORMALDISPLAY, SIGDN_PARENTRELATIVEPARSING, SIIGBF_BIGGERSIZEOK,
+        SIIGBF_ICONONLY,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         CreatePopupMenu, DestroyMenu, GetCursorPos, InsertMenuW, PostMessageW, SetForegroundWindow,
@@ -2022,6 +2024,107 @@ mod win_shell {
             }
         }
     }
+
+    pub struct ClipboardFiles {
+        pub paths: Vec<String>,
+        pub is_cut: bool,
+    }
+
+    pub fn get_clipboard_files() -> Result<ClipboardFiles, String> {
+        const DROPEFFECT_MOVE: u32 = 2;
+        unsafe {
+            if OpenClipboard(None).is_err() {
+                return Err("Failed to open clipboard".to_string());
+            }
+
+            let result = (|| -> Result<ClipboardFiles, String> {
+                let Ok(handle) = GetClipboardData(CF_HDROP.0 as u32) else {
+                    return Ok(ClipboardFiles {
+                        paths: Vec::new(),
+                        is_cut: false,
+                    });
+                };
+
+                let hdrop = HDROP(handle.0);
+                let count = DragQueryFileW(hdrop, 0xFFFF_FFFF, None);
+                let mut paths = Vec::with_capacity(count as usize);
+                for idx in 0..count {
+                    let needed = DragQueryFileW(hdrop, idx, None);
+                    if needed == 0 {
+                        continue;
+                    }
+                    let mut buf = vec![0u16; (needed as usize) + 1];
+                    let written = DragQueryFileW(hdrop, idx, Some(&mut buf));
+                    if written > 0 {
+                        let s = String::from_utf16_lossy(&buf[..written as usize]);
+                        if !s.trim().is_empty() {
+                            paths.push(s);
+                        }
+                    }
+                }
+
+                let mut is_cut = false;
+                let format_name = HSTRING::from("Preferred DropEffect");
+                let drop_effect_fmt = RegisterClipboardFormatW(PCWSTR(format_name.as_ptr()));
+                if drop_effect_fmt != 0 {
+                    if let Ok(effect_handle) = GetClipboardData(drop_effect_fmt) {
+                        let hglobal = HGLOBAL(effect_handle.0);
+                        let ptr = GlobalLock(hglobal);
+                        if !ptr.is_null() {
+                            let effect = *(ptr as *const u32);
+                            is_cut = (effect & DROPEFFECT_MOVE) != 0;
+                            let _ = GlobalUnlock(hglobal);
+                        }
+                    }
+                }
+
+                Ok(ClipboardFiles { paths, is_cut })
+            })();
+
+            let _ = CloseClipboard();
+            result
+        }
+    }
+
+    pub fn clear_clipboard() {
+        unsafe {
+            if OpenClipboard(None).is_ok() {
+                let _ = EmptyClipboard();
+                let _ = CloseClipboard();
+            }
+        }
+    }
+
+    pub fn move_to_recycle_bin(path: &str) -> Result<(), String> {
+        use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
+
+        let wide: Vec<u16> = OsStr::new(path)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .chain(std::iter::once(0))
+            .collect();
+
+        let mut op = SHFILEOPSTRUCTW {
+            hwnd: HWND(std::ptr::null_mut()),
+            wFunc: FO_DELETE,
+            pFrom: PCWSTR(wide.as_ptr()),
+            pTo: PCWSTR::null(),
+            fFlags: (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT).0 as u16,
+            fAnyOperationsAborted: false.into(),
+            hNameMappings: std::ptr::null_mut(),
+            lpszProgressTitle: PCWSTR::null(),
+        };
+
+        let code = unsafe { SHFileOperationW(&mut op) };
+        if code != 0 {
+            return Err(format!("Failed to move item to Recycle Bin (error {})", code));
+        }
+        if op.fAnyOperationsAborted.as_bool() {
+            return Err("Delete operation was cancelled.".to_string());
+        }
+        Ok(())
+    }
 }
 
 fn load_applications_entries() -> Result<Vec<FileEntry>, String> {
@@ -2733,18 +2836,279 @@ async fn show_context_menu(
     }
 }
 
+#[cfg(not(target_os = "windows"))]
+static FALLBACK_CLIPBOARD: std::sync::OnceLock<Mutex<Vec<String>>> = std::sync::OnceLock::new();
+
 #[tauri::command]
 fn copy_file_to_clipboard(path: String) -> Result<(), String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty()
+        || trimmed.starts_with("virtual://")
+        || trimmed.starts_with("app://")
+        || trimmed.starts_with("trash://")
+    {
+        return Err("This item cannot be copied.".to_string());
+    }
+
     #[cfg(target_os = "windows")]
     {
-        win_shell::copy_file_to_clipboard(&path)
+        win_shell::copy_file_to_clipboard(trimmed)
     }
 
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = path;
-        Err("Copy File is not yet implemented on this OS".to_string())
+        let store = FALLBACK_CLIPBOARD.get_or_init(|| Mutex::new(Vec::new()));
+        let mut guard = store.lock().unwrap();
+        guard.clear();
+        guard.push(trimmed.to_string());
+        Ok(())
     }
+}
+
+fn unique_copy_destination(dest_dir: &Path, file_name: &str, is_dir: bool) -> Result<PathBuf, String> {
+    let initial = dest_dir.join(file_name);
+    if fs::symlink_metadata(&initial).is_err() {
+        return Ok(initial);
+    }
+
+    let (stem, ext) = if is_dir {
+        (file_name.to_string(), None)
+    } else if let Some(dot) = file_name.rfind('.') {
+        if dot > 0 {
+            (file_name[..dot].to_string(), Some(&file_name[dot..]))
+        } else {
+            (file_name.to_string(), None)
+        }
+    } else {
+        (file_name.to_string(), None)
+    };
+
+    for idx in 1..=999u32 {
+        let candidate_name = match (idx, ext) {
+            (1, Some(e)) => format!("{} - Copy{}", stem, e),
+            (1, None) => format!("{} - Copy", stem),
+            (n, Some(e)) => format!("{} - Copy ({}){}", stem, n, e),
+            (n, None) => format!("{} - Copy ({})", stem, n),
+        };
+        let candidate = dest_dir.join(candidate_name);
+        if fs::symlink_metadata(&candidate).is_err() {
+            return Ok(candidate);
+        }
+    }
+
+    Err(format!("Too many copies of \"{}\" already exist.", file_name))
+}
+
+fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<(), String> {
+    fs::create_dir_all(dest)
+        .map_err(|e| format!("Failed to create folder \"{}\": {}", dest.display(), e))?;
+    let entries = fs::read_dir(src)
+        .map_err(|e| format!("Failed to read folder \"{}\": {}", src.display(), e))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
+        let src_path = entry.path();
+        let dest_path = dest.join(entry.file_name());
+        let meta = fs::symlink_metadata(&src_path)
+            .map_err(|e| format!("Failed to read metadata for \"{}\": {}", src_path.display(), e))?;
+        if meta.is_dir() {
+            copy_dir_recursive(&src_path, &dest_path)?;
+        } else {
+            fs::copy(&src_path, &dest_path)
+                .map_err(|e| format!("Failed to copy \"{}\": {}", src_path.display(), e))?;
+        }
+    }
+    Ok(())
+}
+
+fn copy_fs_item_to_dir(source: &Path, dest_dir: &Path) -> Result<PathBuf, String> {
+    if !dest_dir.is_dir() {
+        return Err("Destination is not a valid folder.".to_string());
+    }
+    let meta = fs::symlink_metadata(source)
+        .map_err(|_| format!("Source item \"{}\" no longer exists.", source.display()))?;
+    let file_name = source
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .ok_or_else(|| "Cannot determine item name.".to_string())?;
+    let is_dir = meta.is_dir();
+
+    if is_dir && is_path_within_root(&dest_dir.to_string_lossy(), &source.to_string_lossy()) {
+        return Err(format!(
+            "Cannot copy \"{}\" into itself or one of its subfolders.",
+            file_name
+        ));
+    }
+
+    let dest = unique_copy_destination(dest_dir, &file_name, is_dir)?;
+    if is_dir {
+        copy_dir_recursive(source, &dest)?;
+    } else {
+        fs::copy(source, &dest)
+            .map_err(|e| format!("Failed to copy \"{}\": {}", file_name, e))?;
+    }
+    Ok(dest)
+}
+
+fn move_fs_item_to_dir(
+    source: &Path,
+    dest_dir: &Path,
+    allow_unique_name: bool,
+) -> Result<PathBuf, String> {
+    if !dest_dir.is_dir() {
+        return Err("Destination is not a valid folder.".to_string());
+    }
+    let meta = fs::symlink_metadata(source)
+        .map_err(|_| format!("Item \"{}\" could not be found.", source.display()))?;
+    let file_name = source
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .ok_or_else(|| "Cannot determine item name.".to_string())?;
+    let is_dir = meta.is_dir();
+
+    if is_dir && is_path_within_root(&dest_dir.to_string_lossy(), &source.to_string_lossy()) {
+        return Err(format!(
+            "Cannot move \"{}\" into itself or one of its subfolders.",
+            file_name
+        ));
+    }
+
+    // No-op if already in dest_dir
+    if let Some(parent) = source.parent() {
+        if normalize_path_key(&parent.to_string_lossy())
+            == normalize_path_key(&dest_dir.to_string_lossy())
+        {
+            return Ok(source.to_path_buf());
+        }
+    }
+
+    let target = if allow_unique_name {
+        unique_copy_destination(dest_dir, &file_name, is_dir)?
+    } else {
+        let direct = dest_dir.join(&file_name);
+        if fs::symlink_metadata(&direct).is_ok() {
+            return Err(format!(
+                "An item named \"{}\" already exists in \"{}\".",
+                file_name,
+                display_name_for_path(dest_dir)
+            ));
+        }
+        direct
+    };
+
+    if fs::rename(source, &target).is_ok() {
+        return Ok(target);
+    }
+
+    // Cross-volume fallback: copy then remove source
+    if is_dir {
+        copy_dir_recursive(source, &target)?;
+        fs::remove_dir_all(source)
+            .map_err(|e| format!("Moved \"{}\", but failed to remove original: {}", file_name, e))?;
+    } else {
+        fs::copy(source, &target)
+            .map_err(|e| format!("Failed to move \"{}\": {}", file_name, e))?;
+        fs::remove_file(source)
+            .map_err(|e| format!("Moved \"{}\", but failed to remove original: {}", file_name, e))?;
+    }
+    Ok(target)
+}
+
+#[tauri::command]
+async fn paste_from_clipboard(destination_dir: String) -> Result<Vec<String>, String> {
+    let trimmed_dest = destination_dir.trim().to_string();
+    if trimmed_dest.is_empty() || trimmed_dest.starts_with("virtual://") {
+        return Err("Cannot paste items into this location.".to_string());
+    }
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let dest_dir = PathBuf::from(&trimmed_dest);
+        if !dest_dir.is_dir() {
+            return Err("Destination folder does not exist.".to_string());
+        }
+
+        #[cfg(target_os = "windows")]
+        let (paths, is_cut) = {
+            let clip = win_shell::get_clipboard_files()?;
+            (clip.paths, clip.is_cut)
+        };
+
+        #[cfg(not(target_os = "windows"))]
+        let (paths, is_cut) = {
+            let store = FALLBACK_CLIPBOARD.get_or_init(|| Mutex::new(Vec::new()));
+            let guard = store.lock().unwrap();
+            (guard.clone(), false)
+        };
+
+        if paths.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut created = Vec::with_capacity(paths.len());
+        for raw_src in &paths {
+            let src = Path::new(raw_src);
+            let target = if is_cut {
+                move_fs_item_to_dir(src, &dest_dir, true)?
+            } else {
+                copy_fs_item_to_dir(src, &dest_dir)?
+            };
+            created.push(target.to_string_lossy().into_owned());
+        }
+
+        #[cfg(target_os = "windows")]
+        if is_cut && !created.is_empty() {
+            win_shell::clear_clipboard();
+        }
+
+        Ok(created)
+    })
+    .await
+    .map_err(|e| format!("Paste failed: {}", e))?
+}
+
+#[tauri::command]
+async fn delete_item(path: String) -> Result<(), String> {
+    let trimmed = path.trim().to_string();
+    if trimmed.is_empty()
+        || trimmed.starts_with("virtual://")
+        || trimmed.starts_with("app://")
+        || trimmed.starts_with("trash://")
+    {
+        return Err("This item cannot be deleted.".to_string());
+    }
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let target = Path::new(&trimmed);
+        if fs::symlink_metadata(target).is_err() {
+            return Err("The item to delete could not be found.".to_string());
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            win_shell::move_to_recycle_bin(&trimmed)
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            let trash_dir = dirs::home_dir()
+                .map(|h| h.join(".Trash"))
+                .ok_or_else(|| "Could not locate Trash folder.".to_string())?;
+            fs::create_dir_all(&trash_dir)
+                .map_err(|e| format!("Could not access Trash folder: {}", e))?;
+            move_fs_item_to_dir(target, &trash_dir, true).map(|_| ())
+        }
+
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        {
+            let trash_dir = dirs::data_local_dir()
+                .map(|d| d.join("Trash").join("files"))
+                .ok_or_else(|| "Could not locate Trash folder.".to_string())?;
+            fs::create_dir_all(&trash_dir)
+                .map_err(|e| format!("Could not access Trash folder: {}", e))?;
+            move_fs_item_to_dir(target, &trash_dir, true).map(|_| ())
+        }
+    })
+    .await
+    .map_err(|e| format!("Delete failed: {}", e))?
 }
 
 #[tauri::command]
@@ -2817,6 +3181,66 @@ fn create_new_folder(parent_path: String) -> Result<String, String> {
 
     fs::create_dir(&candidate).map_err(|e| format!("Failed to create folder: {}", e))?;
     Ok(candidate.to_string_lossy().into_owned())
+}
+
+fn create_new_file_in_dir(
+    parent_path: &Path,
+    base_name: &str,
+    extension: Option<&str>,
+) -> Result<String, String> {
+    if !parent_path.is_dir() {
+        return Err("Cannot create a file in this location".to_string());
+    }
+
+    let stem = base_name.trim();
+    let stem = if stem.is_empty() {
+        "New Text Document"
+    } else {
+        stem
+    };
+    let clean_ext = extension
+        .map(|e| e.trim().trim_start_matches('.'))
+        .filter(|e| !e.is_empty());
+
+    let make_name = |idx: u32| -> String {
+        match (idx, clean_ext) {
+            (1, Some(ext)) => format!("{}.{}", stem, ext),
+            (1, None) => stem.to_string(),
+            (n, Some(ext)) => format!("{} ({}).{}", stem, n, ext),
+            (n, None) => format!("{} ({})", stem, n),
+        }
+    };
+
+    let mut candidate = parent_path.join(make_name(1));
+    let mut index = 2u32;
+    while fs::symlink_metadata(&candidate).is_ok() {
+        if index > 999 {
+            return Err(format!("Too many files named '{}' already exist", stem));
+        }
+        candidate = parent_path.join(make_name(index));
+        index += 1;
+    }
+
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&candidate)
+        .map_err(|e| format!("Failed to create file: {}", e))?;
+
+    Ok(candidate.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+fn create_new_file(
+    parent_path: String,
+    base_name: Option<String>,
+    extension: Option<String>,
+) -> Result<String, String> {
+    create_new_file_in_dir(
+        Path::new(&parent_path),
+        base_name.as_deref().unwrap_or("New Text Document"),
+        extension.as_deref(),
+    )
 }
 
 #[cfg(target_os = "windows")]
@@ -3508,8 +3932,11 @@ pub fn run() {
             open_item,
             show_context_menu,
             copy_file_to_clipboard,
+            paste_from_clipboard,
+            delete_item,
             reveal_in_file_manager,
             create_new_folder,
+            create_new_file,
             rename_item,
             open_in_terminal,
             share_with_os,
@@ -4332,6 +4759,50 @@ mod tests {
         // Rejects directory & virtual paths
         assert!(read_file_preview_impl(&root.to_string_lossy(), MAX_TEXT_PREVIEW_BYTES).is_err());
         assert!(read_file_preview_impl("virtual://recents", MAX_TEXT_PREVIEW_BYTES).is_err());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn copy_and_create_file_helpers_work_safely() {
+        let unique = format!(
+            "winfinder_fileops_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let root = std::env::temp_dir().join(unique);
+        let src_dir = root.join("src");
+        let dst_dir = root.join("dst");
+        fs::create_dir_all(&src_dir).unwrap();
+        fs::create_dir_all(&dst_dir).unwrap();
+
+        // Create new file with unique numbering
+        let f1 = create_new_file_in_dir(&src_dir, "New Text Document", Some("txt")).unwrap();
+        let f2 = create_new_file_in_dir(&src_dir, "New Text Document", Some("txt")).unwrap();
+        assert!(f1.ends_with("New Text Document.txt"));
+        assert!(f2.ends_with("New Text Document (2).txt"));
+
+        // Copy file into same directory generates " - Copy"
+        let copied_same = copy_fs_item_to_dir(Path::new(&f1), &src_dir).unwrap();
+        assert!(copied_same.file_name().unwrap().to_string_lossy() == "New Text Document - Copy.txt");
+
+        // Copy folder recursively
+        let nested = src_dir.join("Nested");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("child.md"), "# hi").unwrap();
+        let copied_dir = copy_fs_item_to_dir(&nested, &dst_dir).unwrap();
+        assert!(copied_dir.join("child.md").is_file());
+
+        // Reject copying folder into itself/descendant
+        assert!(copy_fs_item_to_dir(&nested, &nested).is_err());
+
+        // Cut-paste move with unique naming into dst_dir
+        let moved = move_fs_item_to_dir(Path::new(&f2), &dst_dir, true).unwrap();
+        assert!(moved.is_file());
+        assert!(!Path::new(&f2).exists());
 
         let _ = fs::remove_dir_all(&root);
     }

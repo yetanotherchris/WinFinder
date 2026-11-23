@@ -463,6 +463,8 @@ export const App: React.FC = () => {
   const [emptyingTrash, setEmptyingTrash] = useState<boolean>(false);
   const [renamingPath, setRenamingPath] = useState<string | null>(null);
   const [renameError, setRenameError] = useState<string | null>(null);
+  const [refreshSeq, setRefreshSeq] = useState<number>(0);
+  const mockClipboardRef = useRef<FileEntry | null>(null);
   const unlockingDriveRef = useRef<string | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const searchRequestIdByTabRef = useRef<Map<string, number>>(new Map());
@@ -2283,13 +2285,124 @@ export const App: React.FC = () => {
   }, []);
 
   const handleCopyFile = useCallback(async (entry: FileEntry) => {
-    if (!isTauriRuntime()) return;
+    if (
+      !entry ||
+      entry.entryKind === "app" ||
+      entry.entryKind === "drive" ||
+      entry.path.startsWith("virtual://") ||
+      entry.path.startsWith("trash://")
+    ) {
+      return;
+    }
+    if (!isTauriRuntime()) {
+      mockClipboardRef.current = entry;
+      return;
+    }
     try {
       await invoke("copy_file_to_clipboard", { path: entry.path });
     } catch (err) {
-      setError(typeof err === "string" ? err : String(err));
+      setRenameError(typeof err === "string" ? err : String(err));
     }
   }, []);
+
+  const handlePaste = useCallback(
+    async (targetDirOverride?: string) => {
+      const destDir = targetDirOverride ?? listing?.currentPath ?? null;
+      if (!destDir || destDir.startsWith("virtual://") || isSearchMode || isTrashView) return;
+
+      if (!isTauriRuntime()) {
+        const clip = mockClipboardRef.current;
+        if (!clip || !listing) return;
+        const copyName = clip.isDir
+          ? `${clip.name} - Copy`
+          : clip.name.includes(".")
+            ? `${clip.name.slice(0, clip.name.lastIndexOf("."))} - Copy${clip.name.slice(clip.name.lastIndexOf("."))}`
+            : `${clip.name} - Copy`;
+        const sep = destDir.includes("\\") ? "\\" : "/";
+        const copiedEntry: FileEntry = {
+          ...clip,
+          name: copyName,
+          path: `${destDir.replace(/[\\/]+$/, "")}${sep}${copyName}`,
+          modifiedMs: Date.now(),
+        };
+        updateActiveTab((prev) => ({
+          ...prev,
+          listing: prev.listing
+            ? { ...prev.listing, entries: [...prev.listing.entries, copiedEntry] }
+            : prev.listing,
+          selectedEntry: copiedEntry,
+        }));
+        return;
+      }
+
+      try {
+        const createdPaths = await invoke<string[]>("paste_from_clipboard", {
+          destinationDir: destDir,
+        });
+        if (createdPaths.length === 0) return;
+        invalidateCachedDirectory(destDir);
+        setRefreshSeq((s) => s + 1);
+        if (listing && normalizePathKey(listing.currentPath) === normalizePathKey(destDir)) {
+          const refreshed = await fetchDirectory(listing.currentPath, { forceRefresh: true });
+          if (refreshed) {
+            const firstKey = normalizePathKey(createdPaths[0]);
+            const matched = refreshed.entries.find(
+              (e) => normalizePathKey(e.path) === firstKey
+            );
+            if (matched) {
+              setSelectedEntry(matched);
+            }
+          }
+        }
+      } catch (err) {
+        setRenameError(typeof err === "string" ? err : String(err));
+      }
+    },
+    [fetchDirectory, isSearchMode, isTrashView, listing, setSelectedEntry, updateActiveTab]
+  );
+
+  const handleDeleteEntry = useCallback(
+    async (entry: FileEntry | null) => {
+      if (!isRenamableEntry(entry, isTrashView) || !entry) return;
+
+      if (!isTauriRuntime()) {
+        updateActiveTab((prev) => ({
+          ...prev,
+          listing: prev.listing
+            ? {
+                ...prev.listing,
+                entries: prev.listing.entries.filter(
+                  (e) => normalizePathKey(e.path) !== normalizePathKey(entry.path)
+                ),
+              }
+            : prev.listing,
+          selectedEntry: null,
+        }));
+        return;
+      }
+
+      try {
+        await invoke("delete_item", { path: entry.path });
+        invalidateCachedDirectory(entry.path);
+        const parentDir = getParentDirPath(entry.path);
+        if (parentDir) {
+          invalidateCachedDirectory(parentDir);
+        }
+        invalidateCachedDirectory("virtual://trash");
+        setSelectedEntry(null);
+        setRefreshSeq((s) => s + 1);
+        if (isSearchMode) {
+          await runSearch(searchQuery);
+        } else if (listing && !listing.currentPath.startsWith("virtual://")) {
+          invalidateCachedDirectory(listing.currentPath);
+          await fetchDirectory(listing.currentPath, { forceRefresh: true });
+        }
+      } catch (err) {
+        setRenameError(typeof err === "string" ? err : String(err));
+      }
+    },
+    [fetchDirectory, isSearchMode, isTrashView, listing, runSearch, searchQuery, setSelectedEntry, updateActiveTab]
+  );
 
   const handleCopyPath = useCallback(async (entry: FileEntry) => {
     try {
@@ -2299,26 +2412,112 @@ export const App: React.FC = () => {
     }
   }, []);
 
-  const handleNewFolder = useCallback(async () => {
-    if (!isTauriRuntime() || !listing || listing.currentPath.startsWith("virtual://")) return;
-    try {
-      const createdPath = await invoke<string>("create_new_folder", {
-        parentPath: listing.currentPath,
-      });
-      invalidateCachedDirectory(listing.currentPath);
-      const refreshed = await fetchDirectory(listing.currentPath, { forceRefresh: true });
-      if (refreshed) {
-        const createdEntry = refreshed.entries.find(
-          (e) => e.path.toLowerCase() === createdPath.toLowerCase()
-        );
-        if (createdEntry) {
-          setSelectedEntry(createdEntry);
-        }
+  const handleNewFolder = useCallback(
+    async (targetDirOverride?: string, startRename = false) => {
+      const parentPath = targetDirOverride ?? listing?.currentPath ?? null;
+      if (!parentPath || parentPath.startsWith("virtual://")) return;
+      if (!isTauriRuntime()) {
+        const sep = parentPath.includes("\\") ? "\\" : "/";
+        const createdEntry: FileEntry = {
+          name: "New folder",
+          path: `${parentPath.replace(/[\\/]+$/, "")}${sep}New folder`,
+          isDir: true,
+          entryKind: "folder",
+          extension: null,
+          size: 0,
+          modifiedMs: Date.now(),
+          iconDataUrl: null,
+        };
+        updateActiveTab((prev) => ({
+          ...prev,
+          listing: prev.listing
+            ? { ...prev.listing, entries: [...prev.listing.entries, createdEntry] }
+            : prev.listing,
+          selectedEntry: createdEntry,
+        }));
+        if (startRename) handleStartRename(createdEntry);
+        return;
       }
-    } catch (err) {
-      setError(typeof err === "string" ? err : String(err));
-    }
-  }, [fetchDirectory, listing]);
+      try {
+        const createdPath = await invoke<string>("create_new_folder", {
+          parentPath,
+        });
+        invalidateCachedDirectory(parentPath);
+        setRefreshSeq((s) => s + 1);
+        if (listing && normalizePathKey(listing.currentPath) === normalizePathKey(parentPath)) {
+          const refreshed = await fetchDirectory(listing.currentPath, { forceRefresh: true });
+          if (refreshed) {
+            const createdEntry = refreshed.entries.find(
+              (e) => normalizePathKey(e.path) === normalizePathKey(createdPath)
+            );
+            if (createdEntry) {
+              setSelectedEntry(createdEntry);
+              if (startRename) {
+                handleStartRename(createdEntry);
+              }
+            }
+          }
+        }
+      } catch (err) {
+        setRenameError(typeof err === "string" ? err : String(err));
+      }
+    },
+    [fetchDirectory, handleStartRename, listing, setSelectedEntry, updateActiveTab]
+  );
+
+  const handleNewFile = useCallback(
+    async (baseName: string, extension: string | null, targetDirOverride?: string) => {
+      const parentPath = targetDirOverride ?? listing?.currentPath ?? null;
+      if (!parentPath || parentPath.startsWith("virtual://")) return;
+      if (!isTauriRuntime()) {
+        const fileName = extension ? `${baseName}.${extension}` : baseName;
+        const sep = parentPath.includes("\\") ? "\\" : "/";
+        const createdEntry: FileEntry = {
+          name: fileName,
+          path: `${parentPath.replace(/[\\/]+$/, "")}${sep}${fileName}`,
+          isDir: false,
+          entryKind: "file",
+          extension,
+          size: 0,
+          modifiedMs: Date.now(),
+          iconDataUrl: null,
+        };
+        updateActiveTab((prev) => ({
+          ...prev,
+          listing: prev.listing
+            ? { ...prev.listing, entries: [...prev.listing.entries, createdEntry] }
+            : prev.listing,
+          selectedEntry: createdEntry,
+        }));
+        handleStartRename(createdEntry);
+        return;
+      }
+      try {
+        const createdPath = await invoke<string>("create_new_file", {
+          parentPath,
+          baseName,
+          extension,
+        });
+        invalidateCachedDirectory(parentPath);
+        setRefreshSeq((s) => s + 1);
+        if (listing && normalizePathKey(listing.currentPath) === normalizePathKey(parentPath)) {
+          const refreshed = await fetchDirectory(listing.currentPath, { forceRefresh: true });
+          if (refreshed) {
+            const createdEntry = refreshed.entries.find(
+              (e) => normalizePathKey(e.path) === normalizePathKey(createdPath)
+            );
+            if (createdEntry) {
+              setSelectedEntry(createdEntry);
+              handleStartRename(createdEntry);
+            }
+          }
+        }
+      } catch (err) {
+        setRenameError(typeof err === "string" ? err : String(err));
+      }
+    },
+    [fetchDirectory, handleStartRename, listing, setSelectedEntry, updateActiveTab]
+  );
 
   const handleToggleShowHidden = useCallback(() => {
     const next = !showHiddenRef.current;
@@ -2541,7 +2740,7 @@ export const App: React.FC = () => {
     };
   }, []);
 
-  // Keyboard support: Ctrl/Cmd+F opens search; Ctrl/Cmd+Shift+G opens Go to Path; Ctrl+, opens Settings; Backspace or Alt+Left goes back; dialog Escape/Enter handling
+  // Keyboard support: Ctrl/Cmd+C/V copy & paste; Delete to Trash; Ctrl/Cmd+F opens search; Ctrl/Cmd+Shift+G opens Go to Path; Ctrl+, opens Settings; Backspace or Alt+Left goes back; dialog Escape/Enter handling
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (missingFavorite) {
@@ -2618,6 +2817,32 @@ export const App: React.FC = () => {
         return;
       }
 
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "c") {
+        const currentSel = selectedEntryRef.current;
+        if (currentSel && isRenamableEntry(currentSel, isTrashView)) {
+          e.preventDefault();
+          void handleCopyFile(currentSel);
+          return;
+        }
+      }
+
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "v") {
+        if (!isSearchMode && !isTrashView && listingRef.current && !listingRef.current.currentPath.startsWith("virtual://")) {
+          e.preventDefault();
+          void handlePaste();
+          return;
+        }
+      }
+
+      if (e.key === "Delete" && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+        const currentSel = selectedEntryRef.current;
+        if (currentSel && isRenamableEntry(currentSel, isTrashView)) {
+          e.preventDefault();
+          void handleDeleteEntry(currentSel);
+          return;
+        }
+      }
+
       if (e.key === "F2" && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
         const currentSel = selectedEntryRef.current;
         if (isRenamableEntry(currentSel, isTrashView)) {
@@ -2641,12 +2866,16 @@ export const App: React.FC = () => {
     goToPathOpen,
     handleBack,
     handleCloseTab,
+    handleCopyFile,
     handleCycleTab,
+    handleDeleteEntry,
     handleForward,
     handleNewTab,
     handleOpenSearch,
+    handlePaste,
     handleRemoveFavorite,
     handleStartRename,
+    isSearchMode,
     isTrashView,
     missingFavorite,
     settingsOpen,
@@ -2807,6 +3036,20 @@ export const App: React.FC = () => {
           onExpandedPathsChange={handleExpandedPathsChange}
           onColumnPathsChange={handleColumnPathsChange}
           onStartFolderDrag={handleStartFolderDrag}
+          refreshSeq={refreshSeq}
+          onNewFolderInDir={(dir, startRename) => void handleNewFolder(dir, startRename)}
+          onNewFileInDir={(dir, baseName, ext) => void handleNewFile(baseName, ext, dir)}
+          onPasteInDir={(dir) => void handlePaste(dir)}
+          onRefresh={handleRefresh}
+          onOpenInTerminalDir={(dir) => {
+            if (isTauriRuntime()) void invoke("open_in_terminal", { path: dir });
+          }}
+          onCopyFolderPath={(dir) => {
+            void navigator.clipboard.writeText(dir).catch(() => {});
+          }}
+          onRevealFolderInExplorer={(dir) => {
+            if (isTauriRuntime()) void invoke("reveal_in_file_manager", { path: dir, select: false });
+          }}
           renamingPath={renamingPath}
           renameError={renameError}
           onCommitRename={handleCommitRename}
