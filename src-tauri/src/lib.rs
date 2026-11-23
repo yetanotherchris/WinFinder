@@ -2747,6 +2747,105 @@ fn copy_file_to_clipboard(path: String) -> Result<(), String> {
     }
 }
 
+fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<(), String> {
+    fs::create_dir_all(dest)
+        .map_err(|e| format!("Failed to create folder \"{}\": {}", dest.display(), e))?;
+    let entries = fs::read_dir(src)
+        .map_err(|e| format!("Failed to read folder \"{}\": {}", src.display(), e))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
+        let src_path = entry.path();
+        let dest_path = dest.join(entry.file_name());
+        let meta = fs::symlink_metadata(&src_path)
+            .map_err(|e| format!("Failed to read metadata for \"{}\": {}", src_path.display(), e))?;
+        if meta.is_dir() {
+            copy_dir_recursive(&src_path, &dest_path)?;
+        } else {
+            fs::copy(&src_path, &dest_path)
+                .map_err(|e| format!("Failed to copy \"{}\": {}", src_path.display(), e))?;
+        }
+    }
+    Ok(())
+}
+
+fn move_fs_item_to_dir(source: &Path, dest_dir: &Path) -> Result<PathBuf, String> {
+    if !dest_dir.is_dir() {
+        return Err("Destination is not a valid folder.".to_string());
+    }
+    let meta = fs::symlink_metadata(source)
+        .map_err(|_| format!("Item \"{}\" could not be found.", source.display()))?;
+    let file_name = source
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .ok_or_else(|| "Cannot determine item name.".to_string())?;
+    let is_dir = meta.is_dir();
+
+    if is_dir && is_path_within_root(&dest_dir.to_string_lossy(), &source.to_string_lossy()) {
+        return Err(format!(
+            "Cannot move \"{}\" into itself or one of its subfolders.",
+            file_name
+        ));
+    }
+
+    // No-op if already in dest_dir
+    if let Some(parent) = source.parent() {
+        if normalize_path_key(&parent.to_string_lossy())
+            == normalize_path_key(&dest_dir.to_string_lossy())
+        {
+            return Ok(source.to_path_buf());
+        }
+    }
+
+    let target = dest_dir.join(&file_name);
+    if fs::symlink_metadata(&target).is_ok() {
+        return Err(format!(
+            "An item named \"{}\" already exists in \"{}\".",
+            file_name,
+            display_name_for_path(dest_dir)
+        ));
+    }
+
+    if fs::rename(source, &target).is_ok() {
+        return Ok(target);
+    }
+
+    // Cross-volume fallback: copy then remove source
+    if is_dir {
+        copy_dir_recursive(source, &target)?;
+        fs::remove_dir_all(source)
+            .map_err(|e| format!("Moved \"{}\", but failed to remove original: {}", file_name, e))?;
+    } else {
+        fs::copy(source, &target)
+            .map_err(|e| format!("Failed to move \"{}\": {}", file_name, e))?;
+        fs::remove_file(source)
+            .map_err(|e| format!("Moved \"{}\", but failed to remove original: {}", file_name, e))?;
+    }
+    Ok(target)
+}
+
+#[tauri::command]
+async fn move_item(source_path: String, destination_dir: String) -> Result<String, String> {
+    let src_trimmed = source_path.trim().to_string();
+    let dest_trimmed = destination_dir.trim().to_string();
+    if src_trimmed.is_empty()
+        || src_trimmed.starts_with("virtual://")
+        || src_trimmed.starts_with("app://")
+        || src_trimmed.starts_with("trash://")
+    {
+        return Err("This item cannot be moved.".to_string());
+    }
+    if dest_trimmed.is_empty() || dest_trimmed.starts_with("virtual://") {
+        return Err("Cannot move items into this location.".to_string());
+    }
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let moved = move_fs_item_to_dir(Path::new(&src_trimmed), Path::new(&dest_trimmed))?;
+        Ok(moved.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|e| format!("Move failed: {}", e))?
+}
+
 #[tauri::command]
 fn reveal_in_file_manager(path: String, select: Option<bool>) -> Result<(), String> {
     let should_select = select.unwrap_or(true);
@@ -3508,6 +3607,7 @@ pub fn run() {
             open_item,
             show_context_menu,
             copy_file_to_clipboard,
+            move_item,
             reveal_in_file_manager,
             create_new_folder,
             rename_item,
@@ -4332,6 +4432,55 @@ mod tests {
         // Rejects directory & virtual paths
         assert!(read_file_preview_impl(&root.to_string_lossy(), MAX_TEXT_PREVIEW_BYTES).is_err());
         assert!(read_file_preview_impl("virtual://recents", MAX_TEXT_PREVIEW_BYTES).is_err());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn move_fs_item_to_dir_moves_files_and_folders_safely() {
+        let unique = format!(
+            "winfinder_dragdrop_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let root = std::env::temp_dir().join(unique);
+        let src_dir = root.join("src");
+        let dst_dir = root.join("dst");
+        fs::create_dir_all(&src_dir).unwrap();
+        fs::create_dir_all(&dst_dir).unwrap();
+
+        // Move file into dst_dir
+        let file_src = src_dir.join("notes.txt");
+        fs::write(&file_src, "hello").unwrap();
+        let moved_file = move_fs_item_to_dir(&file_src, &dst_dir).unwrap();
+        assert!(moved_file.is_file());
+        assert!(!file_src.exists());
+
+        // No-op when moving an item into its own parent directory
+        let same_parent = move_fs_item_to_dir(&moved_file, &dst_dir).unwrap();
+        assert_eq!(same_parent, moved_file);
+
+        // Reject moving when a conflicting item already exists in destination
+        let conflict_file = src_dir.join("notes.txt");
+        fs::write(&conflict_file, "duplicate").unwrap();
+        assert!(move_fs_item_to_dir(&conflict_file, &dst_dir).is_err());
+
+        // Move folder with nested contents into dst_dir
+        let nested = src_dir.join("Nested");
+        let child_dir = nested.join("Deep");
+        fs::create_dir_all(&child_dir).unwrap();
+        fs::write(child_dir.join("child.md"), "# hi").unwrap();
+
+        // Reject moving folder into itself or a descendant
+        assert!(move_fs_item_to_dir(&nested, &nested).is_err());
+        assert!(move_fs_item_to_dir(&nested, &child_dir).is_err());
+
+        let moved_dir = move_fs_item_to_dir(&nested, &dst_dir).unwrap();
+        assert!(moved_dir.join("Deep").join("child.md").is_file());
+        assert!(!nested.exists());
 
         let _ = fs::remove_dir_all(&root);
     }
