@@ -3104,3 +3104,10 @@ body.is-dragging-folder-blocked * {
 .rename-error-dismiss:hover {
   background: rgba(217, 45, 32, 0.14);
 }
+
+/* Settings row divider */
+.settings-row-divider {
+  height: 1px;
+  background: var(--border-subtle, rgba(0, 0, 0, 0.08));
+  margin: 0 12px;
+}

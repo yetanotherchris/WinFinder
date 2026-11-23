@@ -72,6 +72,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   sidebarVisibility: DEFAULT_SIDEBAR_VISIBILITY,
   useEverythingCli: null,
   theme: "light",
+  useBeigeAppIcon: false,
 };
 
 const DEFAULT_VIEW_MODE: ViewMode = "icons";
@@ -148,6 +149,7 @@ function loadBrowserSettings(): AppSettings {
           ? parsed.useEverythingCli
           : null,
       theme: normalizeTheme(parsed?.theme),
+      useBeigeAppIcon: Boolean(parsed?.useBeigeAppIcon),
     };
   } catch {
     return DEFAULT_SETTINGS;
@@ -1137,6 +1139,7 @@ export const App: React.FC = () => {
                 ? persisted.settings.useEverythingCli
                 : null,
             theme: normalizeTheme(persisted?.settings?.theme),
+            useBeigeAppIcon: Boolean(persisted?.settings?.useBeigeAppIcon),
           }
         : loadBrowserSettings();
       setSettings(initialSettings);

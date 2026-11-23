@@ -229,6 +229,8 @@ pub struct AppSettings {
     pub use_everything_cli: Option<bool>,
     #[serde(default = "default_theme")]
     pub theme: String,
+    #[serde(default)]
+    pub use_beige_app_icon: bool,
 }
 
 impl Default for AppSettings {
@@ -238,7 +240,97 @@ impl Default for AppSettings {
             sidebar_visibility: SidebarVisibilitySettings::default(),
             use_everything_cli: None,
             theme: default_theme(),
+            use_beige_app_icon: false,
         }
+    }
+}
+
+const APP_ICON_PNG: &[u8] = include_bytes!("../icons/128x128@2x.png");
+
+fn decode_png_rgba(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+    decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+    let mut reader = decoder
+        .read_info()
+        .map_err(|e| format!("Failed to decode app icon PNG: {}", e))?;
+    let mut buf = vec![0u8; reader.output_buffer_size().unwrap_or(256 * 256 * 4)];
+    let info = reader
+        .next_frame(&mut buf)
+        .map_err(|e| format!("Failed to read app icon PNG frame: {}", e))?;
+    let raw = &buf[..info.buffer_size()];
+    let rgba = match info.color_type {
+        png::ColorType::Rgba => raw.to_vec(),
+        png::ColorType::Rgb => {
+            let mut out = Vec::with_capacity((info.width * info.height * 4) as usize);
+            for chunk in raw.chunks_exact(3) {
+                out.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 255]);
+            }
+            out
+        }
+        _ => return Err("Unsupported app icon PNG color type".to_string()),
+    };
+    Ok((rgba, info.width, info.height))
+}
+
+fn recolor_icon_to_explorer_beige(rgba: &mut [u8], width: u32, height: u32) {
+    let w_denom = width.saturating_sub(1).max(1) as f32;
+    let h_denom = height.saturating_sub(1).max(1) as f32;
+    for y in 0..height {
+        for x in 0..width {
+            let idx = ((y * width + x) * 4) as usize;
+            let r = rgba[idx] as f32;
+            let g = rgba[idx + 1] as f32;
+            let b = rgba[idx + 2] as f32;
+            let a = rgba[idx + 3] as f32;
+            if a <= 12.0 {
+                continue;
+            }
+            let lum = 0.299 * r + 0.587 * g + 0.114 * b;
+            let is_square_region = (b > r + 15.0) || (lum > 170.0);
+            if !is_square_region {
+                continue;
+            }
+            let t = ((x as f32 / w_denom) * 0.55 + (y as f32 / h_denom) * 0.45).clamp(0.0, 1.0);
+            // Classic Windows Explorer folder beige/manila gradient
+            let beige_r = 248.0 * (1.0 - t) + 216.0 * t;
+            let beige_g = 223.0 * (1.0 - t) + 172.0 * t;
+            let beige_b = 152.0 * (1.0 - t) + 84.0 * t;
+
+            let expected_blue_r = 98.0 * (1.0 - t) + 12.0 * t;
+            let mut white_mix = ((r - expected_blue_r - 12.0) / (255.0 - expected_blue_r - 12.0))
+                .clamp(0.0, 1.0);
+            if a <= 40.0 || lum <= 110.0 {
+                white_mix = 0.0;
+            }
+            white_mix = ((white_mix - 0.06) / 0.88).clamp(0.0, 1.0);
+
+            let expected_blue_g = 205.0 * (1.0 - t) + 122.0 * t;
+            let mut shadow_darken = ((expected_blue_g - g) / 140.0).clamp(0.0, 0.22);
+            if a <= 200.0 || white_mix >= 0.05 || b <= r + 40.0 {
+                shadow_darken = 0.0;
+            }
+
+            let black_val = 22.0f32;
+            let sq_r = beige_r * (1.0 - shadow_darken * 0.6);
+            let sq_g = beige_g * (1.0 - shadow_darken * 0.6);
+            let sq_b = beige_b * (1.0 - shadow_darken * 0.6);
+
+            rgba[idx] = (sq_r * (1.0 - white_mix) + black_val * white_mix).clamp(0.0, 255.0) as u8;
+            rgba[idx + 1] =
+                (sq_g * (1.0 - white_mix) + black_val * white_mix).clamp(0.0, 255.0) as u8;
+            rgba[idx + 2] =
+                (sq_b * (1.0 - white_mix) + black_val * white_mix).clamp(0.0, 255.0) as u8;
+        }
+    }
+}
+
+fn apply_app_icon(window: &tauri::WebviewWindow, use_beige: bool) {
+    if let Ok((mut rgba, width, height)) = decode_png_rgba(APP_ICON_PNG) {
+        if use_beige {
+            recolor_icon_to_explorer_beige(&mut rgba, width, height);
+        }
+        let icon = tauri::image::Image::new_owned(rgba, width, height);
+        let _ = window.set_icon(icon);
     }
 }
 
@@ -3309,10 +3401,15 @@ fn save_custom_favorites(
 
 #[tauri::command]
 fn save_settings(
+    app: tauri::AppHandle,
     settings: AppSettings,
     store: tauri::State<'_, Arc<AppStateStore>>,
 ) {
+    let use_beige = settings.use_beige_app_icon;
     store.update_settings(settings);
+    if let Some(window) = app.get_webview_window("main") {
+        apply_app_icon(&window, use_beige);
+    }
 }
 
 #[tauri::command]
@@ -3441,6 +3538,9 @@ pub fn run() {
                 let snapshot = store.snapshot();
                 if let Some(win_state) = &snapshot.window {
                     restore_window_state(&window, win_state);
+                }
+                if snapshot.settings.use_beige_app_icon {
+                    apply_app_icon(&window, true);
                 }
                 let _ = window.show();
                 let _ = window.set_focus();
@@ -4334,5 +4434,30 @@ mod tests {
         assert!(read_file_preview_impl("virtual://recents", MAX_TEXT_PREVIEW_BYTES).is_err());
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn beige_app_icon_recolor_transforms_embedded_png() {
+        let (mut rgba, w, h) = decode_png_rgba(APP_ICON_PNG).unwrap();
+        assert!(w >= 128 && h >= 128);
+        recolor_icon_to_explorer_beige(&mut rgba, w, h);
+        // Sample a pixel in top-left square interior (around 20%, 20%): should be warm beige (R > G > B)
+        let sx = (w / 5) as usize;
+        let sy = (h / 5) as usize;
+        let idx = (sy * (w as usize) + sx) * 4;
+        assert!(rgba[idx + 3] > 200);
+        assert!(rgba[idx] > rgba[idx + 1] && rgba[idx + 1] > rgba[idx + 2]);
+    }
+
+    #[test]
+    fn app_settings_defaults_beige_icon_false() {
+        let legacy: PersistedAppState =
+            serde_json::from_str(r#"{"activePanel":"home","panels":{}}"#).unwrap();
+        assert!(!legacy.settings.use_beige_app_icon);
+        let toggled: PersistedAppState = serde_json::from_str(
+            r#"{"activePanel":"home","panels":{},"settings":{"useBeigeAppIcon":true}}"#,
+        )
+        .unwrap();
+        assert!(toggled.settings.use_beige_app_icon);
     }
 }

@@ -111,6 +111,13 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
     });
   };
 
+  const toggleBeigeAppIcon = () => {
+    onChange({
+      ...settings,
+      useBeigeAppIcon: !settings.useBeigeAppIcon,
+    });
+  };
+
   const toggleSidebarItem = (key: keyof SidebarVisibilitySettings) => {
     onChange({
       ...settings,
@@ -317,6 +324,30 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
                     <span>Dark</span>
                   </button>
                 </div>
+              </div>
+
+              <div className="settings-row-divider" />
+
+              <div className="settings-row">
+                <div className="settings-row-text">
+                  <span id="setting-beige-icon-label" className="settings-row-title">
+                    Classic beige app icon
+                  </span>
+                  <span id="setting-beige-icon-desc" className="settings-row-desc">
+                    Switch the app icon to Windows Explorer beige with a black smiling face.
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={Boolean(settings.useBeigeAppIcon)}
+                  aria-labelledby="setting-beige-icon-label"
+                  aria-describedby="setting-beige-icon-desc"
+                  className={`macos-switch ${settings.useBeigeAppIcon ? "is-on" : ""}`}
+                  onClick={toggleBeigeAppIcon}
+                >
+                  <span className="macos-switch-thumb" aria-hidden="true" />
+                </button>
               </div>
             </div>
 

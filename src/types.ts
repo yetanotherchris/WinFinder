@@ -114,6 +114,7 @@ export interface AppSettings {
   sidebarVisibility: SidebarVisibilitySettings;
   useEverythingCli?: boolean | null;
   theme: ThemeMode;
+  useBeigeAppIcon: boolean;
 }
 
 export interface PersistedAppState {
