@@ -15,6 +15,14 @@ import {
   X,
   Search,
   AlertCircle,
+  FolderPlus,
+  FilePlus,
+  FileText,
+  ClipboardPaste,
+  RefreshCw,
+  Terminal,
+  Copy,
+  FolderOpen,
 } from "lucide-react";
 import type {
   BitlockerNotice,
@@ -87,6 +95,14 @@ interface MainViewProps {
   onExpandedPathsChange: (paths: string[]) => void;
   onColumnPathsChange: (paths: string[]) => void;
   onStartFolderDrag?: (folder: FavoriteFolder, e: React.PointerEvent) => void;
+  refreshSeq?: number;
+  onNewFolderInDir?: (dirPath: string, startRename?: boolean) => void;
+  onNewFileInDir?: (dirPath: string, baseName: string, extension: string | null) => void;
+  onPasteInDir?: (dirPath: string) => void;
+  onRefresh?: () => void;
+  onOpenInTerminalDir?: (dirPath: string) => void;
+  onCopyFolderPath?: (dirPath: string) => void;
+  onRevealFolderInExplorer?: (dirPath: string) => void;
   renamingPath?: string | null;
   renameError?: string | null;
   onCommitRename?: (entry: FileEntry, newName: string) => Promise<string | null>;
@@ -255,6 +271,14 @@ export const MainView: React.FC<MainViewProps> = ({
   onExpandedPathsChange,
   onColumnPathsChange,
   onStartFolderDrag,
+  refreshSeq = 0,
+  onNewFolderInDir,
+  onNewFileInDir,
+  onPasteInDir,
+  onRefresh,
+  onOpenInTerminalDir,
+  onCopyFolderPath,
+  onRevealFolderInExplorer,
   renamingPath = null,
   renameError = null,
   onCommitRename,
@@ -274,6 +298,35 @@ export const MainView: React.FC<MainViewProps> = ({
   onClearSearch,
 }) => {
   const [confirmEmptyOpen, setConfirmEmptyOpen] = useState(false);
+  const [bgMenu, setBgMenu] = useState<{ x: number; y: number; targetDir: string } | null>(null);
+  const bgMenuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!bgMenu) return;
+    const onPointerDown = (e: MouseEvent) => {
+      if (bgMenuRef.current && !bgMenuRef.current.contains(e.target as Node)) {
+        setBgMenu(null);
+      }
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setBgMenu(null);
+      }
+    };
+    const onBlur = () => setBgMenu(null);
+    window.addEventListener("mousedown", onPointerDown);
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      window.removeEventListener("mousedown", onPointerDown);
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("blur", onBlur);
+    };
+  }, [bgMenu]);
+
+  useEffect(() => {
+    setBgMenu(null);
+  }, [currentPath, viewMode, tabId]);
 
   useEffect(() => {
     if (!isTrashView) {
@@ -399,6 +452,19 @@ export const MainView: React.FC<MainViewProps> = ({
         onStartFolderDrag?.({ name: entry.name, path: entry.path }, e);
       },
     };
+  };
+
+  const openBackgroundContextMenu = (e: React.MouseEvent, targetDir: string) => {
+    if (!targetDir || targetDir.startsWith("virtual://") || isTrashView || isSearchView) {
+      return;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+    const menuWidth = 220;
+    const menuHeight = 290;
+    const x = Math.min(e.clientX, Math.max(8, window.innerWidth - menuWidth - 8));
+    const y = Math.min(e.clientY, Math.max(8, window.innerHeight - menuHeight - 8));
+    setBgMenu({ x, y, targetDir });
   };
   const sortedEntries = useMemo(
     () => sortEntries(entries, sortConfig),
@@ -631,7 +697,7 @@ export const MainView: React.FC<MainViewProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [tabId, currentPath, viewMode, showHidden]);
+  }, [tabId, currentPath, viewMode, showHidden, refreshSeq]);
 
   const toggleExpandFolder = async (folderPath: string) => {
     const key = normalizePathKey(folderPath);
@@ -1527,7 +1593,10 @@ export const MainView: React.FC<MainViewProps> = ({
                 className="miller-column"
                 style={{ width: `${colWidth}px`, minWidth: `${colWidth}px` }}
               >
-                <div className="miller-column-scroll">
+                <div
+                  className="miller-column-scroll"
+                  onContextMenu={(e) => openBackgroundContextMenu(e, col.path)}
+                >
                   {col.loading ? (
                     <div className="miller-empty">
                       <div className="finder-spinner" aria-hidden="true" />
@@ -2021,10 +2090,133 @@ export const MainView: React.FC<MainViewProps> = ({
       <main
         className={`finder-canvas view-${viewMode}`}
         onClick={handleCanvasClick}
+        onContextMenu={(e) => openBackgroundContextMenu(e, currentPath)}
         aria-label="Folder contents"
       >
         {renderBody()}
       </main>
+
+      {bgMenu && (
+        <div
+          ref={bgMenuRef}
+          className="bg-context-menu"
+          role="menu"
+          aria-label="Folder actions"
+          style={{ left: `${bgMenu.x}px`, top: `${bgMenu.y}px` }}
+          onContextMenu={(e) => e.preventDefault()}
+        >
+          <button
+            type="button"
+            role="menuitem"
+            className="bg-context-menu-item"
+            onClick={() => {
+              const targetDir = bgMenu.targetDir;
+              setBgMenu(null);
+              onNewFolderInDir?.(targetDir, true);
+            }}
+          >
+            <FolderPlus size={14} strokeWidth={1.8} />
+            <span>New Folder</span>
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            className="bg-context-menu-item"
+            onClick={() => {
+              const targetDir = bgMenu.targetDir;
+              setBgMenu(null);
+              onNewFileInDir?.(targetDir, "New Text Document", "txt");
+            }}
+          >
+            <FilePlus size={14} strokeWidth={1.8} />
+            <span>New Text Document</span>
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            className="bg-context-menu-item"
+            onClick={() => {
+              const targetDir = bgMenu.targetDir;
+              setBgMenu(null);
+              onNewFileInDir?.(targetDir, "New Document", "md");
+            }}
+          >
+            <FileText size={14} strokeWidth={1.8} />
+            <span>New Markdown File</span>
+          </button>
+
+          <div className="bg-context-menu-sep" />
+
+          <button
+            type="button"
+            role="menuitem"
+            className="bg-context-menu-item"
+            onClick={() => {
+              const targetDir = bgMenu.targetDir;
+              setBgMenu(null);
+              onPasteInDir?.(targetDir);
+            }}
+          >
+            <ClipboardPaste size={14} strokeWidth={1.8} />
+            <span>Paste</span>
+            <span className="bg-context-menu-shortcut">Ctrl+V</span>
+          </button>
+
+          <div className="bg-context-menu-sep" />
+
+          <button
+            type="button"
+            role="menuitem"
+            className="bg-context-menu-item"
+            onClick={() => {
+              setBgMenu(null);
+              onRefresh?.();
+            }}
+          >
+            <RefreshCw size={14} strokeWidth={1.8} />
+            <span>Refresh</span>
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            className="bg-context-menu-item"
+            onClick={() => {
+              const targetDir = bgMenu.targetDir;
+              setBgMenu(null);
+              onOpenInTerminalDir?.(targetDir);
+            }}
+          >
+            <Terminal size={14} strokeWidth={1.8} />
+            <span>Open in Terminal</span>
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            className="bg-context-menu-item"
+            onClick={() => {
+              const targetDir = bgMenu.targetDir;
+              setBgMenu(null);
+              onCopyFolderPath?.(targetDir);
+            }}
+          >
+            <Copy size={14} strokeWidth={1.8} />
+            <span>Copy Folder Path</span>
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            className="bg-context-menu-item"
+            onClick={() => {
+              const targetDir = bgMenu.targetDir;
+              setBgMenu(null);
+              onRevealFolderInExplorer?.(targetDir);
+            }}
+          >
+            <FolderOpen size={14} strokeWidth={1.8} />
+            <span>Show in File Explorer</span>
+          </button>
+        </div>
+      )}
 
       {confirmEmptyOpen && (
         <div
