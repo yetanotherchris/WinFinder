@@ -210,6 +210,7 @@ interface TabState {
   bitlockerNotice: BitlockerNotice | null;
   searchOpen: boolean;
   searchQuery: string;
+  searchIncludeSubfolders: boolean;
   searchListing: DirectoryListing | null;
   searchLoading: boolean;
   searchError: string | null;
@@ -234,6 +235,7 @@ function createTabState(id: string, overrides?: Partial<TabState>): TabState {
     bitlockerNotice: null,
     searchOpen: false,
     searchQuery: "",
+    searchIncludeSubfolders: true,
     searchListing: null,
     searchLoading: false,
     searchError: null,
@@ -406,6 +408,7 @@ export const App: React.FC = () => {
   const bitlockerNotice = activeTab.bitlockerNotice;
   const searchOpen = activeTab.searchOpen;
   const searchQuery = activeTab.searchQuery;
+  const searchIncludeSubfolders = activeTab.searchIncludeSubfolders;
   const searchListing = activeTab.searchListing;
   const searchLoading = activeTab.searchLoading;
   const searchError = activeTab.searchError;
@@ -1439,11 +1442,13 @@ export const App: React.FC = () => {
       }
 
       updateTab(tabId, { searchLoading: true });
+      const includeSubfolders = tab?.searchIncludeSubfolders ?? true;
       try {
         const result = await invoke<DirectoryListing>("search_directory", {
           query: q,
           scopePath,
           showHidden: includeHidden,
+          includeSubfolders,
         });
         if (reqId !== searchRequestIdByTabRef.current.get(tabId)) return;
         updateTab(tabId, {
@@ -1460,6 +1465,21 @@ export const App: React.FC = () => {
     },
     [updateTab]
   );
+
+  const handleToggleSearchSubfolders = useCallback(() => {
+    const tabId = activeTabIdRef.current;
+    const currentTab = tabsRef.current.find((t) => t.id === tabId);
+    const nextVal = !(currentTab?.searchIncludeSubfolders ?? true);
+    updateTab(tabId, { searchIncludeSubfolders: nextVal });
+    const q = (currentTab?.searchQuery ?? "").trim();
+    if (q) {
+      // Update ref snapshot synchronously before invoking search
+      tabsRef.current = tabsRef.current.map((t) =>
+        t.id === tabId ? { ...t, searchIncludeSubfolders: nextVal } : t
+      );
+      void runSearch(q, undefined, tabId);
+    }
+  }, [runSearch, updateTab]);
 
   const handleSearchQueryChange = useCallback(
     (next: string) => {
@@ -2825,6 +2845,8 @@ export const App: React.FC = () => {
           }}
           searchQuery={isSearchMode ? trimmedSearch : null}
           searchScopeName={isSearchMode ? searchScopeName : null}
+          searchIncludeSubfolders={searchIncludeSubfolders}
+          onToggleSearchSubfolders={handleToggleSearchSubfolders}
           onClearSearch={() => clearSearch()}
         />
       </div>

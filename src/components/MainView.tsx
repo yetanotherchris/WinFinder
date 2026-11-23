@@ -101,6 +101,8 @@ interface MainViewProps {
   onRetryUnlockDrive?: () => void;
   searchQuery?: string | null;
   searchScopeName?: string | null;
+  searchIncludeSubfolders?: boolean;
+  onToggleSearchSubfolders?: () => void;
   onClearSearch?: () => void;
 }
 
@@ -267,6 +269,8 @@ export const MainView: React.FC<MainViewProps> = ({
   onRetryUnlockDrive,
   searchQuery = null,
   searchScopeName = null,
+  searchIncludeSubfolders = true,
+  onToggleSearchSubfolders,
   onClearSearch,
 }) => {
   const [confirmEmptyOpen, setConfirmEmptyOpen] = useState(false);
@@ -1962,14 +1966,27 @@ export const MainView: React.FC<MainViewProps> = ({
                 : `${sortedEntries.length} ${sortedEntries.length === 1 ? "item" : "items"}`}
             </span>
           </div>
-          <button
-            type="button"
-            className="trash-empty-btn"
-            onClick={() => onClearSearch?.()}
-            title="Clear search and return to folder"
-          >
-            Clear
-          </button>
+          <div className="search-header-actions">
+            <label
+              className="search-subfolders-toggle"
+              title="Uncheck to search only the current folder and exclude subfolders"
+            >
+              <input
+                type="checkbox"
+                checked={searchIncludeSubfolders}
+                onChange={() => onToggleSearchSubfolders?.()}
+              />
+              <span>Include subfolders</span>
+            </label>
+            <button
+              type="button"
+              className="trash-empty-btn"
+              onClick={() => onClearSearch?.()}
+              title="Clear search and return to folder"
+            >
+              Clear
+            </button>
+          </div>
         </div>
       )}
 

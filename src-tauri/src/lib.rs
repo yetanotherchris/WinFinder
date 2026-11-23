@@ -2263,12 +2263,194 @@ fn build_windows_search_sql(scope: &Path, query: &str) -> String {
     )
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum EsQueryToken {
+    Arg(String),
+    NegatedQuoted(String),
+}
+
+fn tokenize_everything_query(query: &str) -> Vec<EsQueryToken> {
+    let chars: Vec<char> = query.chars().collect();
+    let mut tokens = Vec::new();
+    let mut i = 0;
+
+    while i < chars.len() {
+        while i < chars.len() && chars[i].is_whitespace() {
+            i += 1;
+        }
+        if i >= chars.len() {
+            break;
+        }
+
+        // Handle negated quoted phrase: !"some folder"
+        if chars[i] == '!' && i + 1 < chars.len() && chars[i + 1] == '"' {
+            i += 2;
+            let mut inner = String::new();
+            while i < chars.len() && chars[i] != '"' {
+                inner.push(chars[i]);
+                i += 1;
+            }
+            if i < chars.len() && chars[i] == '"' {
+                i += 1;
+            }
+            if !inner.is_empty() {
+                tokens.push(EsQueryToken::NegatedQuoted(inner));
+            }
+            continue;
+        }
+
+        // Handle quoted phrase: "some file"
+        if chars[i] == '"' {
+            i += 1;
+            let mut inner = String::new();
+            while i < chars.len() && chars[i] != '"' {
+                inner.push(chars[i]);
+                i += 1;
+            }
+            if i < chars.len() && chars[i] == '"' {
+                i += 1;
+            }
+            if !inner.is_empty() {
+                tokens.push(EsQueryToken::Arg(inner));
+            }
+            continue;
+        }
+
+        let mut token = String::new();
+        while i < chars.len() && !chars[i].is_whitespace() {
+            token.push(chars[i]);
+            i += 1;
+        }
+        if !token.is_empty() {
+            tokens.push(EsQueryToken::Arg(token));
+        }
+    }
+
+    tokens
+}
+
+fn wildcard_match_lower(pattern: &str, text: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let t: Vec<char> = text.chars().collect();
+    let (mut pi, mut ti) = (0usize, 0usize);
+    let mut star_idx: Option<usize> = None;
+    let mut match_idx = 0usize;
+
+    while ti < t.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star_idx = Some(pi);
+            match_idx = ti;
+            pi += 1;
+        } else if let Some(si) = star_idx {
+            pi = si + 1;
+            match_idx += 1;
+            ti = match_idx;
+        } else {
+            return false;
+        }
+    }
+    while pi < p.len() && p[pi] == '*' {
+        pi += 1;
+    }
+    pi == p.len()
+}
+
+fn match_walk_term(term_lower: &str, name_lower: &str, rel_path_lower: &str, is_dir: bool) -> bool {
+    if term_lower == "folder:" || term_lower == "dir:" {
+        return is_dir;
+    }
+    if term_lower == "file:" {
+        return !is_dir;
+    }
+    if let Some(exts) = term_lower.strip_prefix("ext:") {
+        if is_dir {
+            return false;
+        }
+        let file_ext = Path::new(name_lower)
+            .extension()
+            .map(|e| e.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        return exts.split(';').any(|e| !e.is_empty() && e == file_ext);
+    }
+    let normalized_term = term_lower.replace('\\', "/");
+    let target = if normalized_term.contains('/') {
+        rel_path_lower
+    } else {
+        name_lower
+    };
+    if normalized_term.contains('*') || normalized_term.contains('?') {
+        wildcard_match_lower(&normalized_term, target)
+    } else {
+        target.contains(&normalized_term)
+    }
+}
+
+fn matches_walk_query(query: &str, name: &str, rel_path: &str, is_dir: bool) -> bool {
+    let tokens = tokenize_everything_query(query);
+    if tokens.is_empty() {
+        return false;
+    }
+    let name_lower = name.to_lowercase();
+    let rel_lower = rel_path.replace('\\', "/").to_lowercase();
+
+    for tok in tokens {
+        match tok {
+            EsQueryToken::NegatedQuoted(inner) => {
+                let term = inner.to_lowercase();
+                if term.is_empty() {
+                    continue;
+                }
+                if match_walk_term(&term, &name_lower, &rel_lower, is_dir)
+                    || rel_lower.contains(&term.replace('\\', "/"))
+                {
+                    return false;
+                }
+            }
+            EsQueryToken::Arg(raw) => {
+                if let Some(neg) = raw.strip_prefix('!') {
+                    let term = neg.to_lowercase();
+                    if term.is_empty() {
+                        continue;
+                    }
+                    if match_walk_term(&term, &name_lower, &rel_lower, is_dir)
+                        || rel_lower.contains(&term.replace('\\', "/"))
+                    {
+                        return false;
+                    }
+                } else {
+                    let term = raw.to_lowercase();
+                    if !match_walk_term(&term, &name_lower, &rel_lower, is_dir) {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    true
+}
+
+fn is_direct_child_of(entry_path: &Path, scope_key: &str) -> bool {
+    entry_path
+        .parent()
+        .map(|p| normalize_path_key(&p.to_string_lossy()) == scope_key)
+        .unwrap_or(false)
+}
+
 #[cfg(target_os = "windows")]
 fn query_windows_search_index(
     scope: &Path,
     query: &str,
     show_hidden: bool,
+    include_subfolders: bool,
 ) -> Result<Vec<FileEntry>, String> {
+    // Windows Search LIKE '%query%' does not support negation/wildcards/multi-term syntax
+    if query.contains('!') || query.contains('*') || query.contains('?') || query.contains(' ') {
+        return Err("Advanced query requires Everything CLI or filesystem walk".to_string());
+    }
+
     use std::collections::HashSet;
     use std::os::windows::process::CommandExt;
     use std::process::Command;
@@ -2317,6 +2499,7 @@ try {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
+    let scope_key = normalize_path_key(&scope.to_string_lossy());
     let mut seen = HashSet::new();
     let mut entries = Vec::new();
 
@@ -2326,10 +2509,13 @@ try {
             continue;
         }
         let key = normalize_path_key(raw_path);
-        if !seen.insert(key) {
+        if key == scope_key || !seen.insert(key) {
             continue;
         }
         let entry_path = Path::new(raw_path);
+        if !include_subfolders && !is_direct_child_of(entry_path, &scope_key) {
+            continue;
+        }
         let Ok(metadata) = fs::metadata(entry_path) else {
             continue;
         };
@@ -2352,11 +2538,15 @@ try {
     Ok(entries)
 }
 
-fn walk_search_directory(scope: &Path, query: &str, show_hidden: bool) -> Vec<FileEntry> {
+fn walk_search_directory(
+    scope: &Path,
+    query: &str,
+    show_hidden: bool,
+    include_subfolders: bool,
+) -> Vec<FileEntry> {
     use std::collections::VecDeque;
     use std::time::Instant;
 
-    let query_lower = query.to_lowercase();
     let started = Instant::now();
     let mut queue = VecDeque::new();
     queue.push_back(scope.to_path_buf());
@@ -2388,20 +2578,25 @@ fn walk_search_directory(scope: &Path, query: &str, show_hidden: bool) -> Vec<Fi
             }
 
             let is_symlink = metadata.file_type().is_symlink();
-            if name.to_lowercase().contains(&query_lower) {
-                let effective_meta = if is_symlink {
-                    fs::metadata(&entry_path).unwrap_or(metadata)
-                } else {
-                    metadata
-                };
+            let effective_meta = if is_symlink {
+                fs::metadata(&entry_path).unwrap_or(metadata)
+            } else {
+                metadata
+            };
+            let is_dir = effective_meta.is_dir();
+            let rel_path = entry_path
+                .strip_prefix(scope)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| name.clone());
+
+            if matches_walk_query(query, &name, &rel_path, is_dir) {
                 entries.push(file_entry_from_metadata(&entry_path, name, &effective_meta));
                 if entries.len() >= MAX_SEARCH_RESULTS {
                     break;
                 }
-                if effective_meta.is_dir() && !is_symlink {
-                    queue.push_back(entry_path);
-                }
-            } else if metadata.is_dir() && !is_symlink {
+            }
+
+            if include_subfolders && is_dir && !is_symlink {
                 queue.push_back(entry_path);
             }
         }
@@ -2449,6 +2644,7 @@ fn build_search_entries_from_paths(
     scope: &Path,
     raw_lines: &str,
     show_hidden: bool,
+    include_subfolders: bool,
 ) -> Vec<FileEntry> {
     use std::collections::HashSet;
 
@@ -2466,6 +2662,9 @@ fn build_search_entries_from_paths(
             continue;
         }
         let entry_path = Path::new(raw_path);
+        if !include_subfolders && !is_direct_child_of(entry_path, &scope_key) {
+            continue;
+        }
         let Ok(metadata) = fs::metadata(entry_path) else {
             continue;
         };
@@ -2493,6 +2692,7 @@ fn query_everything_cli(
     scope: &Path,
     query: &str,
     show_hidden: bool,
+    include_subfolders: bool,
 ) -> Result<Vec<FileEntry>, String> {
     use std::os::windows::process::CommandExt;
     use std::process::Command;
@@ -2506,12 +2706,27 @@ fn query_everything_cli(
         MAX_SEARCH_RESULTS * 3
     };
 
-    let output = Command::new(&es_path)
-        .arg("-n")
-        .arg(fetch_limit.to_string())
-        .arg("-path")
-        .arg(scope)
-        .arg(query)
+    let mut cmd = Command::new(&es_path);
+    cmd.arg("-n").arg(fetch_limit.to_string());
+    if include_subfolders {
+        cmd.arg("-path").arg(scope);
+    } else {
+        cmd.arg("-parent").arg(scope);
+    }
+
+    for token in tokenize_everything_query(query) {
+        match token {
+            EsQueryToken::Arg(arg) => {
+                cmd.arg(arg);
+            }
+            EsQueryToken::NegatedQuoted(inner) => {
+                let sanitized = inner.replace('"', "");
+                cmd.raw_arg(format!("!\"{}\"", sanitized));
+            }
+        }
+    }
+
+    let output = cmd
         .creation_flags(CREATE_NO_WINDOW)
         .output()
         .map_err(|e| format!("Failed to run Everything CLI: {}", e))?;
@@ -2528,7 +2743,12 @@ fn query_everything_cli(
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(build_search_entries_from_paths(scope, &stdout, show_hidden))
+    Ok(build_search_entries_from_paths(
+        scope,
+        &stdout,
+        show_hidden,
+        include_subfolders,
+    ))
 }
 
 fn perform_search(
@@ -2536,6 +2756,7 @@ fn perform_search(
     scope_path: Option<&str>,
     show_hidden: bool,
     use_everything_cli: bool,
+    include_subfolders: bool,
 ) -> Result<DirectoryListing, String> {
     let trimmed = query.trim();
     let (_home, home_path, home_name) = home_info()?;
@@ -2556,24 +2777,29 @@ fn perform_search(
 
     #[cfg(target_os = "windows")]
     let entries = if use_everything_cli {
-        match query_everything_cli(&scope, trimmed, show_hidden) {
+        match query_everything_cli(&scope, trimmed, show_hidden, include_subfolders) {
             Ok(found) => found,
-            Err(_) => match query_windows_search_index(&scope, trimmed, show_hidden) {
+            Err(_) => match query_windows_search_index(
+                &scope,
+                trimmed,
+                show_hidden,
+                include_subfolders,
+            ) {
                 Ok(found) if !found.is_empty() => found,
-                _ => walk_search_directory(&scope, trimmed, show_hidden),
+                _ => walk_search_directory(&scope, trimmed, show_hidden, include_subfolders),
             },
         }
     } else {
-        match query_windows_search_index(&scope, trimmed, show_hidden) {
+        match query_windows_search_index(&scope, trimmed, show_hidden, include_subfolders) {
             Ok(found) if !found.is_empty() => found,
-            _ => walk_search_directory(&scope, trimmed, show_hidden),
+            _ => walk_search_directory(&scope, trimmed, show_hidden, include_subfolders),
         }
     };
 
     #[cfg(not(target_os = "windows"))]
     let entries = {
         let _ = use_everything_cli;
-        walk_search_directory(&scope, trimmed, show_hidden)
+        walk_search_directory(&scope, trimmed, show_hidden, include_subfolders)
     };
 
     Ok(DirectoryListing {
@@ -2592,12 +2818,20 @@ async fn search_directory(
     query: String,
     scope_path: Option<String>,
     show_hidden: Option<bool>,
+    include_subfolders: Option<bool>,
     store: tauri::State<'_, Arc<AppStateStore>>,
 ) -> Result<DirectoryListing, String> {
     let include_hidden = show_hidden.unwrap_or(false);
+    let recurse_subfolders = include_subfolders.unwrap_or(true);
     let use_everything_cli = store.snapshot().settings.use_everything_cli.unwrap_or(true);
     tauri::async_runtime::spawn_blocking(move || {
-        perform_search(&query, scope_path.as_deref(), include_hidden, use_everything_cli)
+        perform_search(
+            &query,
+            scope_path.as_deref(),
+            include_hidden,
+            use_everything_cli,
+            recurse_subfolders,
+        )
     })
     .await
     .map_err(|e| format!("Search failed: {}", e))?
@@ -3706,13 +3940,17 @@ mod tests {
             hidden_file.display(),
         );
 
-        let visible = build_search_entries_from_paths(&root, &output, false);
+        let visible = build_search_entries_from_paths(&root, &output, false, true);
         let visible_names: Vec<&str> = visible.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(visible_names, vec!["Reports", "quarterly.txt"]);
 
-        let with_hidden = build_search_entries_from_paths(&root, &output, true);
+        let with_hidden = build_search_entries_from_paths(&root, &output, true, true);
         let all_names: Vec<&str> = with_hidden.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(all_names, vec!["Reports", ".secret.txt", "quarterly.txt"]);
+
+        let top_only = build_search_entries_from_paths(&root, &output, false, false);
+        let top_names: Vec<&str> = top_only.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(top_names, vec!["Reports"]);
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -3893,13 +4131,21 @@ mod tests {
         fs::write(sub.join("beta_report.md"), "world").unwrap();
         fs::write(sub.join(".hidden_report.txt"), "secret").unwrap();
 
-        let visible = walk_search_directory(&root, "report", false);
+        let visible = walk_search_directory(&root, "report", false, true);
         let visible_names: Vec<&str> = visible.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(visible_names, vec!["AlphaReport.txt", "beta_report.md"]);
 
-        let with_hidden = walk_search_directory(&root, "report", true);
+        let with_hidden = walk_search_directory(&root, "report", true, true);
         let hidden_names: Vec<&str> = with_hidden.iter().map(|e| e.name.as_str()).collect();
         assert!(hidden_names.contains(&".hidden_report.txt"));
+
+        let top_only = walk_search_directory(&root, "report", false, false);
+        let top_names: Vec<&str> = top_only.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(top_names, vec!["AlphaReport.txt"]);
+
+        let negated = walk_search_directory(&root, "*report* !SubFolder", false, true);
+        let neg_names: Vec<&str> = negated.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(neg_names, vec!["AlphaReport.txt"]);
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -4334,5 +4580,18 @@ mod tests {
         assert!(read_file_preview_impl("virtual://recents", MAX_TEXT_PREVIEW_BYTES).is_err());
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn tokenize_everything_query_handles_negation_and_quotes() {
+        assert_eq!(
+            tokenize_everything_query("*.md !archive !\"old specs\" \"my notes\""),
+            vec![
+                EsQueryToken::Arg("*.md".to_string()),
+                EsQueryToken::Arg("!archive".to_string()),
+                EsQueryToken::NegatedQuoted("old specs".to_string()),
+                EsQueryToken::Arg("my notes".to_string()),
+            ]
+        );
     }
 }
