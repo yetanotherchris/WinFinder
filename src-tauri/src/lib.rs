@@ -291,10 +291,10 @@ fn recolor_icon_to_explorer_beige(rgba: &mut [u8], width: u32, height: u32) {
                 continue;
             }
             let t = ((x as f32 / w_denom) * 0.55 + (y as f32 / h_denom) * 0.45).clamp(0.0, 1.0);
-            // Classic Windows Explorer folder beige/manila gradient
-            let beige_r = 248.0 * (1.0 - t) + 216.0 * t;
-            let beige_g = 223.0 * (1.0 - t) + 172.0 * t;
-            let beige_b = 152.0 * (1.0 - t) + 84.0 * t;
+            // Windows 11 File Explorer yellow/beige gradient (#FFD55C -> #FABE1C)
+            let beige_r = 255.0 * (1.0 - t) + 250.0 * t;
+            let beige_g = 213.0 * (1.0 - t) + 190.0 * t;
+            let beige_b = 92.0 * (1.0 - t) + 28.0 * t;
 
             let expected_blue_r = 98.0 * (1.0 - t) + 12.0 * t;
             let mut white_mix = ((r - expected_blue_r - 12.0) / (255.0 - expected_blue_r - 12.0))

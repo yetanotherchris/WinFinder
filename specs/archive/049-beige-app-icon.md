@@ -30,3 +30,4 @@ Adds a "Classic beige app icon" Appearance setting (`useBeigeAppIcon`, default `
 
 ## Amendments
 - Generated the Windows Explorer beige + black smiley icon dynamically in Rust from the embedded `src-tauri/icons/128x128@2x.png` via `png` decoding + pixel recoloring rather than storing a duplicate PNG binary asset, keeping the repository clean and ensuring pixel-identical geometry with the main app icon.
+- Adjusted the yellow/beige gradient to `#FFD55C` -> `#FABE1C` sampled directly from the Windows 11 File Explorer icon.
