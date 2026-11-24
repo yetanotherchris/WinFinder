@@ -388,13 +388,22 @@ fn apply_app_icon(window: &tauri::WebviewWindow, use_beige: bool, sync_shortcuts
             recolor_icon_to_explorer_beige(&mut rgba, width, height);
         }
         #[cfg(target_os = "windows")]
-        if sync_shortcuts {
+        {
             let ico_path = if use_beige {
                 write_beige_icon_ico(&rgba, width, height)
             } else {
                 None
             };
-            win_shell::sync_windows_shortcuts_icon(use_beige, ico_path.as_deref());
+            if let Ok(hwnd) = window.hwnd() {
+                win_shell::sync_window_app_user_model_properties(
+                    hwnd.0 as isize,
+                    use_beige,
+                    ico_path.as_deref(),
+                );
+            }
+            if sync_shortcuts {
+                win_shell::sync_windows_shortcuts_icon(use_beige, ico_path.as_deref());
+            }
         }
         #[cfg(not(target_os = "windows"))]
         let _ = sync_shortcuts;
@@ -1188,6 +1197,7 @@ mod win_shell {
         FILE_NOTIFY_CHANGE_DIR_NAME, FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE,
         FILE_NOTIFY_CHANGE_SIZE,
     };
+    use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, IPersistFile,
         CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, STGM_READWRITE,
@@ -1203,15 +1213,18 @@ mod win_shell {
     use windows::Win32::System::Threading::{
         CreateEventW, SetEvent, WaitForMultipleObjects, WaitForSingleObject, INFINITE,
     };
+    use windows::Win32::UI::Shell::PropertiesSystem::{
+        IPropertyStore, SHGetPropertyStoreForWindow,
+    };
     use windows::Win32::UI::Shell::{
         BHID_EnumItems, BHID_SFUIObject, DragQueryFileW, FOLDERID_AppsFolder,
         FOLDERID_RecycleBinFolder, IContextMenu, IDataTransferManagerInterop, IEnumShellItems,
         IShellItem, IShellItem2, IShellItemImageFactory, IShellLinkW, SHChangeNotify,
         SHCreateItemFromParsingName, SHCreateItemFromRelativeName, SHEmptyRecycleBinW,
-        SHFileOperationW, SHGetKnownFolderItem, ShellExecuteExW, ShellLink, CMF_CANRENAME,
-        CMF_EXPLORE, CMF_NORMAL, CMIC_MASK_PTINVOKE, CMINVOKECOMMANDINFO, CMINVOKECOMMANDINFOEX,
-        DROPFILES, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, FO_DELETE,
-        GCS_VERBA, GCS_VERBW, HDROP, KF_FLAG_DEFAULT, SEE_MASK_FLAG_NO_UI,
+        SHFileOperationW, SHGetKnownFolderItem, ShellExecuteExW,
+        ShellLink, CMF_CANRENAME, CMF_EXPLORE, CMF_NORMAL, CMIC_MASK_PTINVOKE, CMINVOKECOMMANDINFO,
+        CMINVOKECOMMANDINFOEX, DROPFILES, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI,
+        FOF_SILENT, FO_DELETE, GCS_VERBA, GCS_VERBW, HDROP, KF_FLAG_DEFAULT, SEE_MASK_FLAG_NO_UI,
         SEE_MASK_NOCLOSEPROCESS, SEE_MASK_UNICODE, SHCNE_ASSOCCHANGED, SHCNE_UPDATEITEM,
         SHCNF_IDLIST, SHCNF_PATHW, SHELLEXECUTEINFOW, SHERB_NOCONFIRMATION, SHERB_NOPROGRESSUI,
         SHFILEOPSTRUCTW, SIGDN_DESKTOPABSOLUTEPARSING, SIGDN_FILESYSPATH, SIGDN_NORMALDISPLAY,
@@ -1234,6 +1247,27 @@ mod win_shell {
         pid: 2,
     };
     const BITLOCKER_PROTECTION_LOCKED: i32 = 6;
+
+    /// `System.AppUserModel.*` property keys (`{9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3}`).
+    const APPUSERMODEL_FMTID: GUID = GUID::from_u128(0x9f4c2855_9f79_4b39_a8d0_e1d42de1d5f3);
+    const PKEY_APPUSERMODEL_RELAUNCH_COMMAND: PROPERTYKEY = PROPERTYKEY {
+        fmtid: APPUSERMODEL_FMTID,
+        pid: 2,
+    };
+    const PKEY_APPUSERMODEL_RELAUNCH_ICON_RESOURCE: PROPERTYKEY = PROPERTYKEY {
+        fmtid: APPUSERMODEL_FMTID,
+        pid: 3,
+    };
+    const PKEY_APPUSERMODEL_RELAUNCH_DISPLAY_NAME_RESOURCE: PROPERTYKEY = PROPERTYKEY {
+        fmtid: APPUSERMODEL_FMTID,
+        pid: 4,
+    };
+    const PKEY_APPUSERMODEL_ID: PROPERTYKEY = PROPERTYKEY {
+        fmtid: APPUSERMODEL_FMTID,
+        pid: 5,
+    };
+    const APP_USER_MODEL_ID_DEFAULT: &str = "com.winfinder.app";
+    const APP_USER_MODEL_ID_BEIGE: &str = "com.winfinder.app.beige";
 
     unsafe fn pwstr_to_string(ptr: PWSTR) -> Option<String> {
         if ptr.is_null() {
@@ -1728,6 +1762,48 @@ mod win_shell {
         s.encode_wide().chain(std::iter::once(0)).collect()
     }
 
+    pub(super) fn sync_window_app_user_model_properties(
+        hwnd_raw: isize,
+        use_beige: bool,
+        beige_ico_path: Option<&Path>,
+    ) {
+        if hwnd_raw == 0 {
+            return;
+        }
+        let Ok(exe_path) = std::env::current_exe() else {
+            return;
+        };
+        let exe_str = exe_path.to_string_lossy();
+        let aumid = if use_beige {
+            APP_USER_MODEL_ID_BEIGE
+        } else {
+            APP_USER_MODEL_ID_DEFAULT
+        };
+        let relaunch_icon = if use_beige {
+            match beige_ico_path {
+                Some(ico) => format!("{},0", ico.to_string_lossy()),
+                None => format!("{},0", exe_str),
+            }
+        } else {
+            format!("{},0", exe_str)
+        };
+        let relaunch_cmd = format!("\"{}\"", exe_str);
+
+        unsafe {
+            let hwnd = HWND(hwnd_raw as *mut std::ffi::c_void);
+            if let Ok(store) = SHGetPropertyStoreForWindow::<IPropertyStore>(hwnd) {
+                let pv_id = PROPVARIANT::from(aumid);
+                let _ = store.SetValue(&PKEY_APPUSERMODEL_ID, &pv_id);
+                let pv_icon = PROPVARIANT::from(relaunch_icon.as_str());
+                let _ = store.SetValue(&PKEY_APPUSERMODEL_RELAUNCH_ICON_RESOURCE, &pv_icon);
+                let pv_cmd = PROPVARIANT::from(relaunch_cmd.as_str());
+                let _ = store.SetValue(&PKEY_APPUSERMODEL_RELAUNCH_COMMAND, &pv_cmd);
+                let pv_name = PROPVARIANT::from("WinFinder");
+                let _ = store.SetValue(&PKEY_APPUSERMODEL_RELAUNCH_DISPLAY_NAME_RESOURCE, &pv_name);
+            }
+        }
+    }
+
     pub(super) fn sync_windows_shortcuts_icon(
         use_beige: bool,
         beige_ico_path: Option<&Path>,
@@ -1739,7 +1815,7 @@ mod win_shell {
             return;
         };
         let appdata_dir = std::path::PathBuf::from(appdata);
-        let candidates = [
+        let mut candidates = vec![
             appdata_dir
                 .join("Microsoft")
                 .join("Windows")
@@ -1753,14 +1829,30 @@ mod win_shell {
                 .join("Start Menu")
                 .join("Programs")
                 .join("WinFinder.lnk"),
-            appdata_dir
-                .join("Microsoft")
-                .join("Internet Explorer")
-                .join("Quick Launch")
-                .join("User Pinned")
-                .join("TaskBar")
-                .join("WinFinder.lnk"),
         ];
+
+        // Also scan all pinned taskbar .lnk files in case Windows named it e.g. "WinFinder (2).lnk"
+        let taskbar_pinned_dir = appdata_dir
+            .join("Microsoft")
+            .join("Internet Explorer")
+            .join("Quick Launch")
+            .join("User Pinned")
+            .join("TaskBar");
+        if let Ok(entries) = std::fs::read_dir(&taskbar_pinned_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.eq_ignore_ascii_case("lnk"))
+                    .unwrap_or(false)
+                {
+                    candidates.push(path);
+                }
+            }
+        } else {
+            candidates.push(taskbar_pinned_dir.join("WinFinder.lnk"));
+        }
 
         let existing: Vec<_> = candidates.into_iter().filter(|p| p.is_file()).collect();
         if existing.is_empty() {
@@ -1768,6 +1860,11 @@ mod win_shell {
         }
 
         let fallback_exe = std::env::current_exe().ok();
+        let aumid = if use_beige {
+            APP_USER_MODEL_ID_BEIGE
+        } else {
+            APP_USER_MODEL_ID_DEFAULT
+        };
 
         unsafe {
             let co_init = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
@@ -1793,30 +1890,53 @@ mod win_shell {
                     continue;
                 }
 
+                // Read the shortcut's target path and verify it points to winfinder.exe
+                let mut target_buf = vec![0u16; 1024];
+                let has_target = link
+                    .GetPath(&mut target_buf, std::ptr::null_mut(), 0)
+                    .is_ok()
+                    && target_buf.first().copied().unwrap_or(0) != 0;
+                let target_string = if has_target {
+                    let len = target_buf
+                        .iter()
+                        .position(|&c| c == 0)
+                        .unwrap_or(target_buf.len());
+                    target_buf.truncate(len);
+                    let s = String::from_utf16_lossy(&target_buf);
+                    target_buf.push(0);
+                    Some(s)
+                } else {
+                    None
+                };
+
+                // Skip unrelated pinned taskbar shortcuts
+                if let Some(ref target) = target_string {
+                    let lower = target.to_ascii_lowercase();
+                    if !lower.ends_with("\\winfinder.exe") && lower != "winfinder.exe" {
+                        continue;
+                    }
+                } else {
+                    let fname = lnk_path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("")
+                        .to_ascii_lowercase();
+                    if !fname.contains("winfinder") {
+                        continue;
+                    }
+                }
+
                 let icon_wide = if use_beige {
                     let Some(ico) = beige_ico_path else {
                         continue;
                     };
                     to_wide_null(ico.as_os_str())
+                } else if has_target {
+                    target_buf
+                } else if let Some(ref exe) = fallback_exe {
+                    to_wide_null(exe.as_os_str())
                 } else {
-                    let mut target_buf = vec![0u16; 1024];
-                    let has_target = link
-                        .GetPath(&mut target_buf, std::ptr::null_mut(), 0)
-                        .is_ok()
-                        && target_buf.first().copied().unwrap_or(0) != 0;
-                    if has_target {
-                        let len = target_buf
-                            .iter()
-                            .position(|&c| c == 0)
-                            .unwrap_or(target_buf.len());
-                        target_buf.truncate(len);
-                        target_buf.push(0);
-                        target_buf
-                    } else if let Some(ref exe) = fallback_exe {
-                        to_wide_null(exe.as_os_str())
-                    } else {
-                        continue;
-                    }
+                    continue;
                 };
 
                 if link
@@ -1824,6 +1944,11 @@ mod win_shell {
                     .is_err()
                 {
                     continue;
+                }
+                if let Ok(prop_store) = link.cast::<IPropertyStore>() {
+                    let pv_id = PROPVARIANT::from(aumid);
+                    let _ = prop_store.SetValue(&PKEY_APPUSERMODEL_ID, &pv_id);
+                    let _ = prop_store.Commit();
                 }
                 if persist.Save(PCWSTR(lnk_wide.as_ptr()), true).is_ok() {
                     updated_any = true;
@@ -4694,6 +4819,15 @@ pub fn run() {
                 }
                 if snapshot.settings.use_beige_app_icon {
                     apply_app_icon(&window, true, false);
+                } else {
+                    #[cfg(target_os = "windows")]
+                    if let Ok(hwnd) = window.hwnd() {
+                        win_shell::sync_window_app_user_model_properties(
+                            hwnd.0 as isize,
+                            false,
+                            None,
+                        );
+                    }
                 }
                 let _ = window.show();
                 let _ = window.set_focus();

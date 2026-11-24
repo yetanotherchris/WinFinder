@@ -28,4 +28,4 @@ Fixes the "Classic beige app icon" setting for Scoop/shortcut-installed and task
 - `winfinder.json`: Updated `post_uninstall` to also remove `~/.winfinder/app-icon-beige.ico`.
 
 ## Amendments
-- None
+- Added `win_shell::sync_window_app_user_model_properties()` via `SHGetPropertyStoreForWindow` (`PKEY_AppUserModel_ID`, `PKEY_AppUserModel_RelaunchIconResource`, `PKEY_AppUserModel_RelaunchCommand`, `PKEY_AppUserModel_RelaunchDisplayNameResource`) and synced `PKEY_AppUserModel_ID` on `.lnk` shortcuts + scanned all `User Pinned\TaskBar\*.lnk` files targeting `winfinder.exe`, so pinning the running window to the Windows 11 taskbar preserves the beige icon immediately, when closed, and across restarts without creating duplicate buttons. Verified end-to-end with a Scoop install inside Windows Sandbox.
