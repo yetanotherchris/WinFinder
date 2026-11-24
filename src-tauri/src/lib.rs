@@ -324,11 +324,80 @@ fn recolor_icon_to_explorer_beige(rgba: &mut [u8], width: u32, height: u32) {
     }
 }
 
-fn apply_app_icon(window: &tauri::WebviewWindow, use_beige: bool) {
+fn encode_rgba_to_ico(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
+    let mut png_bytes = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut png_bytes, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder
+            .write_header()
+            .map_err(|e| format!("Failed to write ICO PNG header: {}", e))?;
+        writer
+            .write_image_data(rgba)
+            .map_err(|e| format!("Failed to encode ICO PNG data: {}", e))?;
+    }
+
+    let png_len = u32::try_from(png_bytes.len())
+        .map_err(|_| "Encoded ICO PNG exceeds u32 length".to_string())?;
+    let ico_w: u8 = if width >= 256 { 0 } else { width as u8 };
+    let ico_h: u8 = if height >= 256 { 0 } else { height as u8 };
+
+    let mut ico = Vec::with_capacity(22 + png_bytes.len());
+    // ICONDIR (6 bytes): reserved=0, type=1 (ICO), count=1
+    ico.extend_from_slice(&0u16.to_le_bytes());
+    ico.extend_from_slice(&1u16.to_le_bytes());
+    ico.extend_from_slice(&1u16.to_le_bytes());
+    // ICONDIRENTRY (16 bytes)
+    ico.push(ico_w);
+    ico.push(ico_h);
+    ico.push(0); // color count
+    ico.push(0); // reserved
+    ico.extend_from_slice(&1u16.to_le_bytes()); // color planes
+    ico.extend_from_slice(&32u16.to_le_bytes()); // bits per pixel
+    ico.extend_from_slice(&png_len.to_le_bytes()); // image data size
+    ico.extend_from_slice(&22u32.to_le_bytes()); // image data offset (6 + 16)
+    ico.extend_from_slice(&png_bytes);
+    Ok(ico)
+}
+
+#[cfg(target_os = "windows")]
+fn write_beige_icon_ico(rgba: &[u8], width: u32, height: u32) -> Option<PathBuf> {
+    let home = dirs::home_dir()?;
+    let dir = home.join(".winfinder");
+    if dir.is_file() {
+        let _ = fs::remove_file(&dir);
+    }
+    fs::create_dir_all(&dir).ok()?;
+    let ico_path = dir.join("app-icon-beige.ico");
+    let ico_bytes = encode_rgba_to_ico(rgba, width, height).ok()?;
+    let tmp_path = dir.join("app-icon-beige.ico.tmp");
+    if fs::write(&tmp_path, &ico_bytes).is_ok() {
+        if fs::rename(&tmp_path, &ico_path).is_ok() {
+            return Some(ico_path);
+        }
+        let _ = fs::remove_file(&tmp_path);
+    }
+    fs::write(&ico_path, ico_bytes).ok()?;
+    Some(ico_path)
+}
+
+fn apply_app_icon(window: &tauri::WebviewWindow, use_beige: bool, sync_shortcuts: bool) {
     if let Ok((mut rgba, width, height)) = decode_png_rgba(APP_ICON_PNG) {
         if use_beige {
             recolor_icon_to_explorer_beige(&mut rgba, width, height);
         }
+        #[cfg(target_os = "windows")]
+        if sync_shortcuts {
+            let ico_path = if use_beige {
+                write_beige_icon_ico(&rgba, width, height)
+            } else {
+                None
+            };
+            win_shell::sync_windows_shortcuts_icon(use_beige, ico_path.as_deref());
+        }
+        #[cfg(not(target_os = "windows"))]
+        let _ = sync_shortcuts;
         let icon = tauri::image::Image::new_owned(rgba, width, height);
         let _ = window.set_icon(icon);
     }
@@ -1120,7 +1189,8 @@ mod win_shell {
         FILE_NOTIFY_CHANGE_SIZE,
     };
     use windows::Win32::System::Com::{
-        CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_APARTMENTTHREADED,
+        CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, IPersistFile,
+        CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, STGM_READWRITE,
     };
     use windows::Win32::System::DataExchange::{
         CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, RegisterClipboardFormatW,
@@ -1136,15 +1206,16 @@ mod win_shell {
     use windows::Win32::UI::Shell::{
         BHID_EnumItems, BHID_SFUIObject, DragQueryFileW, FOLDERID_AppsFolder,
         FOLDERID_RecycleBinFolder, IContextMenu, IDataTransferManagerInterop, IEnumShellItems,
-        IShellItem, IShellItem2, IShellItemImageFactory, SHCreateItemFromParsingName,
-        SHCreateItemFromRelativeName, SHEmptyRecycleBinW, SHFileOperationW, SHGetKnownFolderItem,
-        ShellExecuteExW, CMF_CANRENAME, CMF_EXPLORE, CMF_NORMAL, CMIC_MASK_PTINVOKE,
-        CMINVOKECOMMANDINFO, CMINVOKECOMMANDINFOEX, DROPFILES, FOF_ALLOWUNDO, FOF_NOCONFIRMATION,
-        FOF_NOERRORUI, FOF_SILENT, FO_DELETE, GCS_VERBA, GCS_VERBW, HDROP, KF_FLAG_DEFAULT,
-        SEE_MASK_FLAG_NO_UI, SEE_MASK_NOCLOSEPROCESS, SEE_MASK_UNICODE, SHELLEXECUTEINFOW,
-        SHERB_NOCONFIRMATION, SHERB_NOPROGRESSUI, SHFILEOPSTRUCTW, SIGDN_DESKTOPABSOLUTEPARSING,
-        SIGDN_FILESYSPATH, SIGDN_NORMALDISPLAY, SIGDN_PARENTRELATIVEPARSING, SIIGBF_BIGGERSIZEOK,
-        SIIGBF_ICONONLY,
+        IShellItem, IShellItem2, IShellItemImageFactory, IShellLinkW, SHChangeNotify,
+        SHCreateItemFromParsingName, SHCreateItemFromRelativeName, SHEmptyRecycleBinW,
+        SHFileOperationW, SHGetKnownFolderItem, ShellExecuteExW, ShellLink, CMF_CANRENAME,
+        CMF_EXPLORE, CMF_NORMAL, CMIC_MASK_PTINVOKE, CMINVOKECOMMANDINFO, CMINVOKECOMMANDINFOEX,
+        DROPFILES, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, FO_DELETE,
+        GCS_VERBA, GCS_VERBW, HDROP, KF_FLAG_DEFAULT, SEE_MASK_FLAG_NO_UI,
+        SEE_MASK_NOCLOSEPROCESS, SEE_MASK_UNICODE, SHCNE_ASSOCCHANGED, SHCNE_UPDATEITEM,
+        SHCNF_IDLIST, SHCNF_PATHW, SHELLEXECUTEINFOW, SHERB_NOCONFIRMATION, SHERB_NOPROGRESSUI,
+        SHFILEOPSTRUCTW, SIGDN_DESKTOPABSOLUTEPARSING, SIGDN_FILESYSPATH, SIGDN_NORMALDISPLAY,
+        SIGDN_PARENTRELATIVEPARSING, SIIGBF_BIGGERSIZEOK, SIIGBF_ICONONLY,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         CreatePopupMenu, DestroyMenu, GetCursorPos, InsertMenuW, PostMessageW, SetForegroundWindow,
@@ -1650,6 +1721,129 @@ mod win_shell {
         }
 
         drives
+    }
+
+    fn to_wide_null(s: &std::ffi::OsStr) -> Vec<u16> {
+        use std::os::windows::ffi::OsStrExt;
+        s.encode_wide().chain(std::iter::once(0)).collect()
+    }
+
+    pub(super) fn sync_windows_shortcuts_icon(
+        use_beige: bool,
+        beige_ico_path: Option<&Path>,
+    ) {
+        if use_beige && beige_ico_path.is_none() {
+            return;
+        }
+        let Ok(appdata) = std::env::var("APPDATA") else {
+            return;
+        };
+        let appdata_dir = std::path::PathBuf::from(appdata);
+        let candidates = [
+            appdata_dir
+                .join("Microsoft")
+                .join("Windows")
+                .join("Start Menu")
+                .join("Programs")
+                .join("Scoop Apps")
+                .join("WinFinder.lnk"),
+            appdata_dir
+                .join("Microsoft")
+                .join("Windows")
+                .join("Start Menu")
+                .join("Programs")
+                .join("WinFinder.lnk"),
+            appdata_dir
+                .join("Microsoft")
+                .join("Internet Explorer")
+                .join("Quick Launch")
+                .join("User Pinned")
+                .join("TaskBar")
+                .join("WinFinder.lnk"),
+        ];
+
+        let existing: Vec<_> = candidates.into_iter().filter(|p| p.is_file()).collect();
+        if existing.is_empty() {
+            return;
+        }
+
+        let fallback_exe = std::env::current_exe().ok();
+
+        unsafe {
+            let co_init = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            let should_uninit = co_init.is_ok();
+            let mut updated_any = false;
+
+            for lnk_path in &existing {
+                let lnk_wide = to_wide_null(lnk_path.as_os_str());
+                let Ok(link) = CoCreateInstance::<_, IShellLinkW>(
+                    &ShellLink,
+                    None,
+                    CLSCTX_INPROC_SERVER,
+                ) else {
+                    continue;
+                };
+                let Ok(persist) = link.cast::<IPersistFile>() else {
+                    continue;
+                };
+                if persist
+                    .Load(PCWSTR(lnk_wide.as_ptr()), STGM_READWRITE)
+                    .is_err()
+                {
+                    continue;
+                }
+
+                let icon_wide = if use_beige {
+                    let Some(ico) = beige_ico_path else {
+                        continue;
+                    };
+                    to_wide_null(ico.as_os_str())
+                } else {
+                    let mut target_buf = vec![0u16; 1024];
+                    let has_target = link
+                        .GetPath(&mut target_buf, std::ptr::null_mut(), 0)
+                        .is_ok()
+                        && target_buf.first().copied().unwrap_or(0) != 0;
+                    if has_target {
+                        let len = target_buf
+                            .iter()
+                            .position(|&c| c == 0)
+                            .unwrap_or(target_buf.len());
+                        target_buf.truncate(len);
+                        target_buf.push(0);
+                        target_buf
+                    } else if let Some(ref exe) = fallback_exe {
+                        to_wide_null(exe.as_os_str())
+                    } else {
+                        continue;
+                    }
+                };
+
+                if link
+                    .SetIconLocation(PCWSTR(icon_wide.as_ptr()), 0)
+                    .is_err()
+                {
+                    continue;
+                }
+                if persist.Save(PCWSTR(lnk_wide.as_ptr()), true).is_ok() {
+                    updated_any = true;
+                    SHChangeNotify(
+                        SHCNE_UPDATEITEM,
+                        SHCNF_PATHW,
+                        Some(lnk_wide.as_ptr() as *const _),
+                        None,
+                    );
+                }
+            }
+
+            if updated_any {
+                SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, None, None);
+            }
+
+            if should_uninit {
+                CoUninitialize();
+            }
+        }
     }
 
     pub(super) fn is_recycle_bin_path(path: &str) -> bool {
@@ -4205,7 +4399,7 @@ fn save_settings(
     let use_beige = settings.use_beige_app_icon;
     store.update_settings(settings);
     if let Some(window) = app.get_webview_window("main") {
-        apply_app_icon(&window, use_beige);
+        apply_app_icon(&window, use_beige, true);
     }
 }
 
@@ -4499,10 +4693,13 @@ pub fn run() {
                     restore_window_state(&window, win_state);
                 }
                 if snapshot.settings.use_beige_app_icon {
-                    apply_app_icon(&window, true);
+                    apply_app_icon(&window, true, false);
                 }
                 let _ = window.show();
                 let _ = window.set_focus();
+                if snapshot.settings.use_beige_app_icon {
+                    apply_app_icon(&window, true, true);
+                }
             }
             window_ready_for_setup.store(true, Ordering::Release);
             Ok(())
@@ -5425,6 +5622,19 @@ mod tests {
         let idx = (sy * (w as usize) + sx) * 4;
         assert!(rgba[idx + 3] > 200);
         assert!(rgba[idx] > rgba[idx + 1] && rgba[idx + 1] > rgba[idx + 2]);
+    }
+
+    #[test]
+    fn beige_app_icon_ico_encoding_produces_valid_ico_header() {
+        let (mut rgba, w, h) = decode_png_rgba(APP_ICON_PNG).unwrap();
+        recolor_icon_to_explorer_beige(&mut rgba, w, h);
+        let ico = encode_rgba_to_ico(&rgba, w, h).unwrap();
+        // ICONDIR: reserved=0, type=1, count=1
+        assert!(ico.len() > 30);
+        assert_eq!(&ico[0..6], &[0, 0, 1, 0, 1, 0]);
+        // Offset to embedded PNG is 22 and starts with PNG signature
+        assert_eq!(u32::from_le_bytes(ico[18..22].try_into().unwrap()), 22);
+        assert_eq!(&ico[22..30], &[137, 80, 78, 71, 13, 10, 26, 10]);
     }
 
     #[test]

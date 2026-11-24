@@ -2505,6 +2505,14 @@ body.is-dragging-folder-blocked * {
   color: var(--text-secondary);
 }
 
+.settings-row-note {
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--text-secondary);
+  opacity: 0.85;
+  margin-top: 2px;
+}
+
 .settings-row-hint {
   font-size: 11px;
   line-height: 1.35;

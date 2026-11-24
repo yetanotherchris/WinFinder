@@ -336,13 +336,16 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
                   <span id="setting-beige-icon-desc" className="settings-row-desc">
                     Switch the app icon to Windows Explorer beige with a black smiling face.
                   </span>
+                  <span id="setting-beige-icon-note" className="settings-row-note">
+                    Restart WinFinder to apply. If pinned to the Windows taskbar, unpin and re-pin the icon for it to refresh.
+                  </span>
                 </div>
                 <button
                   type="button"
                   role="switch"
                   aria-checked={Boolean(settings.useBeigeAppIcon)}
                   aria-labelledby="setting-beige-icon-label"
-                  aria-describedby="setting-beige-icon-desc"
+                  aria-describedby="setting-beige-icon-desc setting-beige-icon-note"
                   className={`macos-switch ${settings.useBeigeAppIcon ? "is-on" : ""}`}
                   onClick={toggleBeigeAppIcon}
                 >
