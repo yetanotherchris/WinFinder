@@ -2188,17 +2188,20 @@ export const App: React.FC = () => {
     [updateActiveTab, updateTrackedPanelState]
   );
 
-  const handleOpenItem = useCallback(async (entry: FileEntry) => {
-    if (!isTauriRuntime()) return;
-    try {
-      await invoke("open_item", {
-        path: entry.path,
-        entryKind: entry.entryKind,
-      });
-    } catch (err) {
-      setError(typeof err === "string" ? err : String(err));
-    }
-  }, []);
+  const handleOpenItem = useCallback(
+    async (entry: FileEntry) => {
+      if (!isTauriRuntime()) return;
+      try {
+        await invoke("open_item", {
+          path: entry.path,
+          entryKind: entry.entryKind,
+        });
+      } catch (err) {
+        setError(typeof err === "string" ? err : String(err));
+      }
+    },
+    [setError]
+  );
 
   const handleStartRename = useCallback(
     (entry: FileEntry | null) => {
@@ -2943,6 +2946,68 @@ export const App: React.FC = () => {
             // Ignore transient read errors while external writers are active
           });
       }
+    })
+      .then((fn) => {
+        if (cancelled) {
+          fn();
+        } else {
+          unlisten = fn;
+        }
+      })
+      .catch(() => {
+        // Ignore if event listener is unavailable
+      });
+
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  }, [updateTab]);
+
+  // Silently refresh any open Applications tabs when background app scan updates the cache
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let cancelled = false;
+    let unlisten: (() => void) | null = null;
+
+    void listen("applications-updated", () => {
+      if (cancelled) return;
+      invalidateCachedDirectory("virtual://applications");
+      const hasAppsTab = tabsRef.current.some(
+        (tab) => tab.listing?.currentPath === "virtual://applications"
+      );
+      if (!hasAppsTab) return;
+
+      const includeHidden = showHiddenRef.current;
+      void invoke<DirectoryListing>("list_directory", {
+        path: "virtual://applications",
+        showHidden: includeHidden,
+      })
+        .then((fresh) => {
+          if (cancelled) return;
+          setCachedDirectory("virtual://applications", includeHidden, fresh);
+          for (const tab of tabsRef.current) {
+            if (tab.listing?.currentPath !== "virtual://applications") continue;
+            if (listingsEqual(tab.listing, fresh)) continue;
+            updateTab(tab.id, (prev) => {
+              if (prev.listing?.currentPath !== "virtual://applications") return prev;
+              const prevSelKey = prev.selectedEntry
+                ? normalizePathKey(prev.selectedEntry.path)
+                : null;
+              const preservedSel = prevSelKey
+                ? (fresh.entries.find((e) => normalizePathKey(e.path) === prevSelKey) ?? null)
+                : null;
+              return {
+                ...prev,
+                listing: fresh,
+                selectedEntry: preservedSel,
+              };
+            });
+          }
+        })
+        .catch(() => {
+          // Ignore transient refresh errors
+        });
     })
       .then((fn) => {
         if (cancelled) {
