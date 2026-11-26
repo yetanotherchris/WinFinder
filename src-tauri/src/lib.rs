@@ -832,7 +832,7 @@ pub struct BreadcrumbItem {
     pub path: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct FileEntry {
     pub name: String,
@@ -873,6 +873,118 @@ fn extract_windows_drive_root(raw: &str) -> Option<String> {
     None
 }
 
+/// Returns `true` only when `std::fs::metadata(path)` definitively reports `ErrorKind::NotFound`.
+/// Fails open (`false`) on `PermissionDenied` (e.g. `C:\Program Files\WindowsApps`) or any other I/O error.
+fn local_target_is_missing(path: &Path) -> bool {
+    matches!(fs::metadata(path), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+}
+
+/// Returns `true` if `raw` is a local Windows drive path (e.g. `C:\foo` or `\\?\C:\foo`),
+/// excluding UNC paths (`\\server\share`), UWP AUMIDs, and known-folder GUID prefixes.
+fn is_local_windows_drive_path(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    let stripped = trimmed.strip_prefix(r"\\?\").unwrap_or(trimmed);
+    let bytes = stripped.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
+}
+
+/// Parses a Windows `AppsFolder` known-folder GUID prefix of the form
+/// `{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}\relative\path` into `(guid_u128, relative_path)`.
+fn parse_known_folder_guid_prefix(raw: &str) -> Option<(u128, &str)> {
+    let trimmed = raw.trim();
+    let bytes = trimmed.as_bytes();
+    if bytes.len() < 40 || bytes[0] != b'{' || bytes[37] != b'}' {
+        return None;
+    }
+    if bytes[38] != b'\\' && bytes[38] != b'/' {
+        return None;
+    }
+    let guid_str = &trimmed[1..37];
+    let gb = guid_str.as_bytes();
+    if gb[8] != b'-' || gb[13] != b'-' || gb[18] != b'-' || gb[23] != b'-' {
+        return None;
+    }
+    let mut hex = String::with_capacity(32);
+    for (i, ch) in guid_str.chars().enumerate() {
+        if matches!(i, 8 | 13 | 18 | 23) {
+            continue;
+        }
+        if !ch.is_ascii_hexdigit() {
+            return None;
+        }
+        hex.push(ch);
+    }
+    let guid_u128 = u128::from_str_radix(&hex, 16).ok()?;
+    let rel = trimmed[39..].trim_start_matches(|c| c == '\\' || c == '/');
+    if rel.is_empty() {
+        return None;
+    }
+    Some((guid_u128, rel))
+}
+
+const APPS_CACHE_VERSION: u32 = 2;
+
+fn sort_app_entries(entries: &mut Vec<FileEntry>) {
+    entries.sort_by(|a, b| {
+        a.name
+            .to_lowercase()
+            .cmp(&b.name.to_lowercase())
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.path.cmp(&b.path))
+    });
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AppsDiskCache {
+    version: u32,
+    entries: Vec<FileEntry>,
+}
+
+fn apps_cache_file_path_for_home(home: &Path) -> PathBuf {
+    home.join(".winfinder").join("applications-cache.json")
+}
+
+fn load_apps_disk_cache(path: &Path) -> Option<Vec<FileEntry>> {
+    let raw = fs::read_to_string(path).ok()?;
+    let cache: AppsDiskCache = serde_json::from_str(&raw).ok()?;
+    if cache.version != APPS_CACHE_VERSION {
+        return None;
+    }
+    let mut entries = cache.entries;
+    sort_app_entries(&mut entries);
+    Some(entries)
+}
+
+fn save_apps_disk_cache(path: &Path, entries: &[FileEntry]) {
+    let payload = AppsDiskCache {
+        version: APPS_CACHE_VERSION,
+        entries: entries.to_vec(),
+    };
+    let Ok(json) = serde_json::to_string(&payload) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        if parent.is_file() {
+            let _ = fs::remove_file(parent);
+        }
+        if fs::create_dir_all(parent).is_err() {
+            return;
+        }
+    }
+    let tmp_path = path.with_file_name("applications-cache.json.tmp");
+    if fs::write(&tmp_path, &json).is_ok() {
+        if fs::rename(&tmp_path, path).is_ok() {
+            return;
+        }
+        let _ = fs::remove_file(&tmp_path);
+    }
+    let _ = fs::write(path, json);
+}
+
 enum AppsLoadState {
     Loading,
     Ready(Vec<FileEntry>),
@@ -880,28 +992,83 @@ enum AppsLoadState {
 }
 
 struct AppsCache {
+    cache_path: Option<PathBuf>,
     state: Mutex<AppsLoadState>,
     ready: Condvar,
 }
 
 impl AppsCache {
-    fn new() -> Arc<Self> {
+    fn from_home(home: Option<PathBuf>) -> Arc<Self> {
+        let cache_path = home.map(|h| apps_cache_file_path_for_home(&h));
+        let initial_state = cache_path
+            .as_deref()
+            .and_then(load_apps_disk_cache)
+            .map(AppsLoadState::Ready)
+            .unwrap_or(AppsLoadState::Loading);
+
         Arc::new(Self {
-            state: Mutex::new(AppsLoadState::Loading),
+            cache_path,
+            state: Mutex::new(initial_state),
             ready: Condvar::new(),
         })
     }
 
-    fn start_preload(self: &Arc<Self>) {
+    fn new() -> Arc<Self> {
+        Self::from_home(dirs::home_dir())
+    }
+
+    fn apply_refresh_result(&self, result: Result<Vec<FileEntry>, String>) -> bool {
+        let mut guard = self.state.lock().unwrap();
+        let (should_save, should_emit, entries_to_save) = match result {
+            Ok(fresh_entries) => {
+                let (had_cached, changed) = match &*guard {
+                    AppsLoadState::Ready(prev) => (true, *prev != fresh_entries),
+                    AppsLoadState::Loading | AppsLoadState::Failed(_) => (false, true),
+                };
+                *guard = AppsLoadState::Ready(fresh_entries.clone());
+                self.ready.notify_all();
+                let should_save = !had_cached || changed;
+                let should_emit = changed;
+                (
+                    should_save,
+                    should_emit,
+                    if should_save {
+                        Some(fresh_entries)
+                    } else {
+                        None
+                    },
+                )
+            }
+            Err(err) => {
+                if !matches!(*guard, AppsLoadState::Ready(_)) {
+                    *guard = AppsLoadState::Failed(err);
+                }
+                self.ready.notify_all();
+                (false, false, None)
+            }
+        };
+        drop(guard);
+
+        if should_save {
+            if let (Some(path), Some(entries)) =
+                (self.cache_path.as_deref(), entries_to_save.as_deref())
+            {
+                save_apps_disk_cache(path, entries);
+            }
+        }
+        should_emit
+    }
+
+    fn start_preload(self: &Arc<Self>, app_handle: Option<tauri::AppHandle>) {
         let cache = Arc::clone(self);
         std::thread::spawn(move || {
             let result = load_applications_entries();
-            let mut guard = cache.state.lock().unwrap();
-            *guard = match result {
-                Ok(entries) => AppsLoadState::Ready(entries),
-                Err(err) => AppsLoadState::Failed(err),
-            };
-            cache.ready.notify_all();
+            let should_emit = cache.apply_refresh_result(result);
+            if should_emit {
+                if let Some(handle) = app_handle {
+                    let _ = handle.emit("applications-updated", ());
+                }
+            }
         });
     }
 
@@ -1172,7 +1339,10 @@ fn list_recents(show_hidden: bool) -> Result<DirectoryListing, String> {
 
 #[cfg(target_os = "windows")]
 mod win_shell {
-    use super::{extract_windows_drive_root, ContextMenuResult, FileEntry, UnlockDriveResult};
+    use super::{
+        extract_windows_drive_root, is_local_windows_drive_path, local_target_is_missing,
+        parse_known_folder_guid_prefix, ContextMenuResult, FileEntry, UnlockDriveResult,
+    };
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
     use std::collections::HashSet;
     use std::mem::size_of;
@@ -1221,7 +1391,7 @@ mod win_shell {
         FOLDERID_RecycleBinFolder, IContextMenu, IDataTransferManagerInterop, IEnumShellItems,
         IShellItem, IShellItem2, IShellItemImageFactory, IShellLinkW, SHChangeNotify,
         SHCreateItemFromParsingName, SHCreateItemFromRelativeName, SHEmptyRecycleBinW,
-        SHFileOperationW, SHGetKnownFolderItem, ShellExecuteExW,
+        SHFileOperationW, SHGetKnownFolderItem, SHGetKnownFolderPath, ShellExecuteExW,
         ShellLink, CMF_CANRENAME, CMF_EXPLORE, CMF_NORMAL, CMIC_MASK_PTINVOKE, CMINVOKECOMMANDINFO,
         CMINVOKECOMMANDINFOEX, DROPFILES, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI,
         FOF_SILENT, FO_DELETE, GCS_VERBA, GCS_VERBW, HDROP, KF_FLAG_DEFAULT, SEE_MASK_FLAG_NO_UI,
@@ -1461,6 +1631,42 @@ mod win_shell {
         true
     }
 
+    const PKEY_LINK_TARGET_PARSING_PATH: PROPERTYKEY = PROPERTYKEY {
+        fmtid: GUID::from_u128(0xB9B4B3FC_2B51_4A42_B5D8_324146AFCF25),
+        pid: 2,
+    };
+
+    unsafe fn app_target_exists(item: &IShellItem, aumid: &str) -> bool {
+        if let Ok(item2) = item.cast::<IShellItem2>() {
+            if let Ok(pwstr) = item2.GetString(&PKEY_LINK_TARGET_PARSING_PATH) {
+                if let Some(target) = pwstr_to_string(pwstr) {
+                    if is_local_windows_drive_path(&target)
+                        && local_target_is_missing(Path::new(&target))
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+
+        if is_local_windows_drive_path(aumid) {
+            if local_target_is_missing(Path::new(aumid)) {
+                return false;
+            }
+        } else if let Some((guid_u128, rel)) = parse_known_folder_guid_prefix(aumid) {
+            let guid = GUID::from_u128(guid_u128);
+            if let Ok(folder_pwstr) = SHGetKnownFolderPath(&guid, KF_FLAG_DEFAULT, None) {
+                if let Some(folder_path) = pwstr_to_string(folder_pwstr) {
+                    if local_target_is_missing(&Path::new(&folder_path).join(rel)) {
+                        return false;
+                    }
+                }
+            }
+        }
+
+        true
+    }
+
     pub fn enumerate_apps() -> Result<Vec<FileEntry>, String> {
         unsafe {
             let co_hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
@@ -1499,6 +1705,9 @@ mod win_shell {
                             continue;
                         };
                         if !should_include_app(&name, &aumid) {
+                            continue;
+                        }
+                        if !app_target_exists(&item, &aumid) {
                             continue;
                         }
                         if !seen_names.insert(name.trim().to_lowercase()) {
@@ -2657,14 +2866,12 @@ mod win_shell {
 
 fn load_applications_entries() -> Result<Vec<FileEntry>, String> {
     #[cfg(target_os = "windows")]
-    {
-        win_shell::enumerate_apps()
-    }
+    let mut entries = win_shell::enumerate_apps()?;
 
     #[cfg(target_os = "macos")]
-    {
+    let mut entries = {
         let listing = list_fs_directory(Path::new("/Applications"), false)?;
-        Ok(listing
+        listing
             .entries
             .into_iter()
             .map(|mut e| {
@@ -2672,13 +2879,14 @@ fn load_applications_entries() -> Result<Vec<FileEntry>, String> {
                 e.is_dir = false;
                 e
             })
-            .collect())
-    }
+            .collect::<Vec<_>>()
+    };
 
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    {
-        Ok(Vec::new())
-    }
+    let mut entries = Vec::new();
+
+    sort_app_entries(&mut entries);
+    Ok(entries)
 }
 
 fn list_applications(cache: &AppsCache) -> Result<DirectoryListing, String> {
@@ -4797,7 +5005,7 @@ async fn empty_trash() -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let apps_cache = AppsCache::new();
-    apps_cache.start_preload();
+    let apps_cache_for_setup = Arc::clone(&apps_cache);
     let state_store = AppStateStore::load();
     let dir_watcher = Arc::new(DirWatcherManager::new());
     let initial_path = InitialPath(resolve_initial_path_from_args(std::env::args().skip(1)));
@@ -4811,6 +5019,7 @@ pub fn run() {
         .manage(Arc::clone(&dir_watcher))
         .manage(initial_path)
         .setup(move |app| {
+            apps_cache_for_setup.start_preload(Some(app.handle().clone()));
             if let Some(window) = app.get_webview_window("main") {
                 let store = app.state::<Arc<AppStateStore>>();
                 let snapshot = store.snapshot();
@@ -5887,5 +6096,167 @@ mod tests {
         assert!(!nested.exists());
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    fn sample_app_entry(name: &str, path: &str) -> FileEntry {
+        FileEntry {
+            name: name.to_string(),
+            path: path.to_string(),
+            is_dir: false,
+            entry_kind: "app".to_string(),
+            extension: None,
+            size: 0,
+            modified_ms: None,
+            icon_data_url: Some("data:image/png;base64,AAAA".to_string()),
+            is_locked: false,
+        }
+    }
+
+    #[test]
+    fn apps_disk_cache_round_trip_and_invalid_fallbacks() {
+        let unique = format!(
+            "winfinder_apps_cache_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let fake_home = std::env::temp_dir().join(unique);
+        let cache_path = apps_cache_file_path_for_home(&fake_home);
+
+        // Missing file returns None
+        assert!(load_apps_disk_cache(&cache_path).is_none());
+
+        // Save and load round-trip
+        let mut entries = vec![
+            sample_app_entry("Zoom", "app://zoom"),
+            sample_app_entry("Calculator", "app://calc"),
+        ];
+        sort_app_entries(&mut entries);
+        save_apps_disk_cache(&cache_path, &entries);
+        assert!(cache_path.is_file());
+
+        let loaded = load_apps_disk_cache(&cache_path).expect("should load valid cache");
+        assert_eq!(loaded, entries);
+
+        // Version mismatch returns None
+        let wrong_version = serde_json::json!({
+            "version": APPS_CACHE_VERSION + 1,
+            "entries": entries,
+        });
+        fs::write(&cache_path, wrong_version.to_string()).unwrap();
+        assert!(load_apps_disk_cache(&cache_path).is_none());
+
+        // Corrupt JSON returns None
+        fs::write(&cache_path, "{ not valid json").unwrap();
+        assert!(load_apps_disk_cache(&cache_path).is_none());
+
+        let _ = fs::remove_dir_all(&fake_home);
+    }
+
+    #[test]
+    fn apps_cache_from_home_seeds_immediately_and_handles_refresh() {
+        let unique = format!(
+            "winfinder_apps_cache_refresh_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let fake_home = std::env::temp_dir().join(unique);
+        let cache_path = apps_cache_file_path_for_home(&fake_home);
+
+        let mut initial = vec![sample_app_entry("Alpha", "app://alpha")];
+        sort_app_entries(&mut initial);
+        save_apps_disk_cache(&cache_path, &initial);
+
+        // Seeded immediately from disk without waiting for preload
+        let cache = AppsCache::from_home(Some(fake_home.clone()));
+        assert_eq!(cache.get_or_wait().unwrap(), initial);
+
+        // Identical refresh does not emit update
+        assert!(!cache.apply_refresh_result(Ok(initial.clone())));
+        assert_eq!(cache.get_or_wait().unwrap(), initial);
+
+        // Error refresh preserves existing cached data
+        assert!(!cache.apply_refresh_result(Err("shell failed".to_string())));
+        assert_eq!(cache.get_or_wait().unwrap(), initial);
+
+        // Changed refresh updates in-memory state, persists to disk, and signals emit
+        let mut updated = vec![
+            sample_app_entry("Alpha", "app://alpha"),
+            sample_app_entry("Beta", "app://beta"),
+        ];
+        sort_app_entries(&mut updated);
+        assert!(cache.apply_refresh_result(Ok(updated.clone())));
+        assert_eq!(cache.get_or_wait().unwrap(), updated);
+        assert_eq!(load_apps_disk_cache(&cache_path).unwrap(), updated);
+
+        // Cold cache with no file starts in Loading and fails cleanly if refresh fails
+        let cold_home = fake_home.join("cold");
+        let cold_cache = AppsCache::from_home(Some(cold_home));
+        assert!(matches!(
+            *cold_cache.state.lock().unwrap(),
+            AppsLoadState::Loading
+        ));
+        assert!(!cold_cache.apply_refresh_result(Err("boom".to_string())));
+        assert_eq!(cold_cache.get_or_wait().unwrap_err(), "boom");
+
+        let _ = fs::remove_dir_all(&fake_home);
+    }
+
+    #[test]
+    fn app_target_path_and_known_folder_guid_helpers() {
+        assert!(is_local_windows_drive_path(r"C:\Apps\ComfyUI\ComfyUI.exe"));
+        assert!(is_local_windows_drive_path(r"\\?\D:\Tools\app.exe"));
+        assert!(is_local_windows_drive_path("c:/Program Files/App/app.exe"));
+        assert!(!is_local_windows_drive_path(r"\\server\share\app.exe"));
+        assert!(!is_local_windows_drive_path(
+            "Microsoft.WindowsStore_8wekyb3d8bbwe!App"
+        ));
+        assert!(!is_local_windows_drive_path(
+            r"{6D809377-6AF0-444B-8957-A3773F02200E}\App\app.exe"
+        ));
+        assert!(!is_local_windows_drive_path("C:"));
+
+        let parsed = parse_known_folder_guid_prefix(
+            r"{6D809377-6AF0-444B-8957-A3773F02200E}\ComfyUI\ComfyUI.exe",
+        );
+        assert_eq!(
+            parsed,
+            Some((
+                0x6D809377_6AF0_444B_8957_A3773F02200E,
+                r"ComfyUI\ComfyUI.exe"
+            ))
+        );
+
+        assert!(parse_known_folder_guid_prefix(
+            "Microsoft.WindowsStore_8wekyb3d8bbwe!App"
+        )
+        .is_none());
+        assert!(parse_known_folder_guid_prefix(r"{6D809377-6AF0-444B-8957-A3773F02200E}\").is_none());
+        assert!(parse_known_folder_guid_prefix(
+            r"{ZZZZZZZZ-6AF0-444B-8957-A3773F02200E}\app.exe"
+        )
+        .is_none());
+
+        // local_target_is_missing returns false for existing paths and true for missing paths
+        let unique = format!(
+            "winfinder_missing_target_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let temp_dir = std::env::temp_dir().join(unique);
+        fs::create_dir_all(&temp_dir).unwrap();
+        let existing_file = temp_dir.join("present.exe");
+        fs::write(&existing_file, b"ok").unwrap();
+        assert!(!local_target_is_missing(&existing_file));
+        assert!(local_target_is_missing(&temp_dir.join("gone.exe")));
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 }
